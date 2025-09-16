@@ -1,0 +1,11 @@
+flask
+flask-cors
+python-dotenv
+insightface
+onnxruntime
+opencv-python
+numpy
+supabase
+SQLAlchemy
+PyMySQL
+cryptography>=42,<45
