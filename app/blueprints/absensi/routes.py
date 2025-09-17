@@ -113,6 +113,8 @@ def checkin():
     f = request.files.get("image")
     agenda_ids = _extract_agenda_kerja_ids(request)
     recipients = _extract_recipients(request)
+    note_desc = (request.form.get("deskripsi_catatan") or "").strip()
+    note_url = (request.form.get("lampiran_url") or "").strip()
 
     metric = "cosine"
     threshold = 0.45
@@ -157,8 +159,23 @@ def checkin():
         )
         s.add(rec)
 
+        catatan_payload = None
         try:
             s.flush()  # dapatkan rec.id_absensi
+
+            if note_desc:
+                cat = Catatan(
+                    id_absensi=rec.id_absensi,
+                    deskripsi_catatan=note_desc,
+                    lampiran_url=note_url or None,
+                )
+                s.add(cat)
+                s.flush()
+                catatan_payload = {
+                    "id_catatan": cat.id_catatan,
+                    "deskripsi_catatan": cat.deskripsi_catatan,
+                    "lampiran_url": cat.lampiran_url,
+                }
 
             # Tautkan agenda_kerja -> absensi
             linked_count, skipped_count = _link_agendas_to_absensi(s, user_id, rec.id_absensi, agenda_ids)
@@ -199,6 +216,7 @@ def checkin():
             agendasLinked=linked_count,
             agendasSkipped=skipped_count,
             recipientsAdded=added_rcp,
+            catatan=catatan_payload,
             **v,
         )
 
@@ -212,6 +230,8 @@ def checkout():
     f = request.files.get("image")
     agenda_ids = _extract_agenda_kerja_ids(request)
     recipients = _extract_recipients(request)
+    note_desc = (request.form.get("deskripsi_catatan") or "").strip()
+    note_url = (request.form.get("lampiran_url") or "").strip()
 
     metric = "cosine"
     threshold = 0.45
@@ -256,6 +276,36 @@ def checkout():
         rec.out_longitude = lng
         rec.face_verified_pulang = True
 
+        catatan_payload = None
+        if note_desc:
+            existing_cat = (
+                s.query(Catatan)
+                .filter(Catatan.id_absensi == rec.id_absensi)
+                .one_or_none()
+            )
+
+            if existing_cat:
+                existing_cat.deskripsi_catatan = note_desc
+                existing_cat.lampiran_url = note_url or None
+                catatan_payload = {
+                    "id_catatan": existing_cat.id_catatan,
+                    "deskripsi_catatan": existing_cat.deskripsi_catatan,
+                    "lampiran_url": existing_cat.lampiran_url,
+                }
+            else:
+                new_cat = Catatan(
+                    id_absensi=rec.id_absensi,
+                    deskripsi_catatan=note_desc,
+                    lampiran_url=note_url or None,
+                )
+                s.add(new_cat)
+                s.flush()
+                catatan_payload = {
+                    "id_catatan": new_cat.id_catatan,
+                    "deskripsi_catatan": new_cat.deskripsi_catatan,
+                    "lampiran_url": new_cat.lampiran_url,
+                }
+
         # Tautkan agenda_kerja -> absensi (kalau ada yang dikirim saat checkout)
         linked_count, skipped_count = _link_agendas_to_absensi(s, user_id, rec.id_absensi, agenda_ids)
 
@@ -292,6 +342,7 @@ def checkout():
             agendasLinked=linked_count,
             agendasSkipped=skipped_count,
             recipientsAdded=added_rcp,
+            catatan=catatan_payload,
             **v,
         )
 
