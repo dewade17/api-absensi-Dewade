@@ -19,11 +19,6 @@ from ...db.models import (
     User,
     Catatan,
 )
-from ...services.storage.supabase_storage import (
-    upload_bytes,
-    signed_url,
-    build_catatan_path,
-)
 
 absensi_bp = Blueprint("absensi", __name__)
 
@@ -107,91 +102,6 @@ def _link_agendas_to_absensi(session, user_id: str, absensi_id: str, agenda_ids:
             # sudah tertaut ke absensi (mungkin hari lain) -> skip
             skipped += 1
     return updated, skipped
-
-
-def _serialize_catatan(row: Catatan) -> dict:
-    return {
-        "id_catatan": row.id_catatan,
-        "id_absensi": row.id_absensi,
-        "deskripsi_catatan": row.deskripsi_catatan,
-        "lampiran_url": row.lampiran_url,
-        "lampiran_signed_url": signed_url(row.lampiran_url) if row.lampiran_url else None,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-    }
-
-
-# ---------- routes ----------
-
-
-@absensi_bp.get("/api/absensi/<absensi_id>/catatan")
-def list_catatan(absensi_id: str):
-    absensi_id = (absensi_id or "").strip()
-    if not absensi_id:
-        return error("absensi_id wajib ada", 400)
-
-    with get_session() as s:
-        absensi = s.get(Absensi, absensi_id)
-        if absensi is None:
-            return error("Absensi tidak ditemukan", 404)
-
-        rows = (
-            s.query(Catatan)
-            .filter(Catatan.id_absensi == absensi_id)
-            .order_by(Catatan.created_at.asc(), Catatan.id_catatan.asc())
-            .all()
-        )
-        serialized = [_serialize_catatan(r) for r in rows]
-        return ok(catatan=serialized, total=len(serialized))
-
-
-@absensi_bp.post("/api/absensi/<absensi_id>/catatan")
-def create_catatan(absensi_id: str):
-    absensi_id = (absensi_id or "").strip()
-    if not absensi_id:
-        return error("absensi_id wajib ada", 400)
-
-    deskripsi = (request.form.get("deskripsi_catatan") or "").strip()
-    if not deskripsi and request.is_json:
-        body = request.get_json(silent=True) or {}
-        deskripsi = (body.get("deskripsi_catatan") or "").strip()
-    if not deskripsi:
-        return error("deskripsi_catatan wajib ada", 400)
-
-    lampiran = request.files.get("lampiran")
-
-    with get_session() as s:
-        absensi = s.get(Absensi, absensi_id)
-        if absensi is None:
-            return error("Absensi tidak ditemukan", 404)
-
-        lampiran_url = None
-        if lampiran and lampiran.filename:
-            data = lampiran.read()
-            if data:
-                storage_path = build_catatan_path(absensi.id_user, lampiran.filename)
-                content_type = lampiran.mimetype or "application/octet-stream"
-                lampiran_url = upload_bytes(storage_path, data, content_type)
-
-        catatan = Catatan(
-            id_absensi=absensi_id,
-            deskripsi_catatan=deskripsi,
-            lampiran_url=lampiran_url,
-        )
-        s.add(catatan)
-        s.commit()
-        s.refresh(catatan)
-
-        rows = (
-            s.query(Catatan)
-            .filter(Catatan.id_absensi == absensi_id)
-            .order_by(Catatan.created_at.asc(), Catatan.id_catatan.asc())
-            .all()
-        )
-        serialized = [_serialize_catatan(r) for r in rows]
-        return ok(catatan=serialized, total=len(serialized), created=_serialize_catatan(catatan))
-
-
 
 # ---------- routes ----------
 @absensi_bp.post("/api/absensi/checkin")
