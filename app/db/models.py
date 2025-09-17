@@ -403,6 +403,7 @@ class Absensi(Base):
 
     agendas = relationship("AgendaKerja", back_populates="absensi")  # detail agenda per absensi/hari
     report_recipients = relationship("AbsensiReportRecipient", back_populates="absensi")
+    catatan = relationship("Catatan", back_populates="absensi")  # <- relasi ke tabel catatan
 
     __table_args__ = (
         UniqueConstraint("id_user", "tanggal", name="uq_absensi_user_tanggal"),
@@ -554,4 +555,24 @@ class AbsensiReportRecipient(Base):
         Index("idx_arr_absensi", "id_absensi"),
         Index("idx_arr_user", "id_user"),
         UniqueConstraint("id_absensi", "id_user", name="uq_absensi_user_recipient"),
+    )
+
+
+# ===== Catatan Absensi =====
+class Catatan(Base):
+    __tablename__ = "catatan"
+
+    id_catatan = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    id_absensi = Column(String(36), ForeignKey("Absensi.id_absensi", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    deskripsi_catatan = Column(Text, nullable=False)
+    lampiran_url = Column(Text)
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    deleted_at = Column(DateTime)
+
+    absensi = relationship("Absensi", back_populates="catatan")
+
+    __table_args__ = (
+        Index("idx_catatan_absensi", "id_absensi"),
     )
