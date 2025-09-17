@@ -60,6 +60,31 @@ def _extract_recipients(req) -> list[str]:
     return cleaned[:max_rcp]
 
 
+def _extract_catatan_entries(req) -> list[dict[str, str | None]]:
+    """Kumpulkan pasangan deskripsi dan lampiran dari permintaan multipart."""
+    descs = req.form.getlist("deskripsi_catatan")
+    urls = req.form.getlist("lampiran_url")
+    max_items = int(current_app.config.get("MAX_CATATAN_PER_REQUEST", 20))
+
+    entries: list[dict[str, str | None]] = []
+    total = max(len(descs), len(urls))
+    for idx in range(total):
+        desc_raw = descs[idx] if idx < len(descs) else ""
+        url_raw = urls[idx] if idx < len(urls) else ""
+        desc = (desc_raw or "").strip()
+        if not desc:
+            continue
+        url = (url_raw or "").strip() or None
+        entries.append(
+            {
+                "deskripsi_catatan": desc,
+                "lampiran_url": url,
+            }
+        )
+        if len(entries) >= max_items:
+            break
+    return entries
+
 def _map_to_atasan_role(user: User) -> AtasanRole | None:
     """
     Snapshot role penerima sesuai enum AtasanRole (HR/OPERASIONAL/DIREKTUR).
@@ -114,8 +139,7 @@ def checkin():
     f = request.files.get("image")
     agenda_ids = _extract_agenda_kerja_ids(request)
     recipients = _extract_recipients(request)
-    note_desc = (request.form.get("deskripsi_catatan") or "").strip()
-    note_url = (request.form.get("lampiran_url") or "").strip() or None
+    catatan_entries = _extract_catatan_entries(request)
 
     metric = "cosine"
     threshold = 0.45
@@ -160,23 +184,29 @@ def checkin():
         )
         s.add(rec)
 
-        catatan_payload = None
+        catatan_payload: list[dict[str, str | None]] = []
         try:
             s.flush()  # dapatkan rec.id_absensi
 
-            if note_desc:
-                catatan_row = Catatan(
-                    id_absensi=rec.id_absensi,
-                    deskripsi_catatan=note_desc,
-                    lampiran_url=note_url,
-                )
-                s.add(catatan_row)
+            if catatan_entries:
+                catatan_rows: list[Catatan] = []
+                for entry in catatan_entries:
+                    row = Catatan(
+                        id_absensi=rec.id_absensi,
+                        deskripsi_catatan=entry["deskripsi_catatan"],
+                        lampiran_url=entry["lampiran_url"],
+                    )
+                    s.add(row)
+                    catatan_rows.append(row)
                 s.flush()
-                catatan_payload = {
-                    "id_catatan": catatan_row.id_catatan,
-                    "deskripsi_catatan": catatan_row.deskripsi_catatan,
-                    "lampiran_url": catatan_row.lampiran_url,
-                }
+                catatan_payload = [
+                    {
+                        "id_catatan": row.id_catatan,
+                        "deskripsi_catatan": row.deskripsi_catatan,
+                        "lampiran_url": row.lampiran_url,
+                    }
+                    for row in catatan_rows
+                ]
 
             # Tautkan agenda_kerja -> absensi
             linked_count, skipped_count = _link_agendas_to_absensi(s, user_id, rec.id_absensi, agenda_ids)
@@ -218,7 +248,7 @@ def checkin():
             agendasSkipped=skipped_count,
             recipientsAdded=added_rcp,
             catatan=catatan_payload,
-            **v,
+                      **v,
         )
 
 
@@ -231,8 +261,7 @@ def checkout():
     f = request.files.get("image")
     agenda_ids = _extract_agenda_kerja_ids(request)
     recipients = _extract_recipients(request)
-    note_desc = (request.form.get("deskripsi_catatan") or "").strip()
-    note_url = (request.form.get("lampiran_url") or "").strip() or None
+    catatan_entries = _extract_catatan_entries(request)
 
     metric = "cosine"
     threshold = 0.45
@@ -277,31 +306,85 @@ def checkout():
         rec.out_longitude = lng
         rec.face_verified_pulang = True
 
-        catatan_payload = None
-        if note_desc:
-            catatan_row = (
-                s.query(Catatan)
-                .filter(Catatan.id_absensi == rec.id_absensi)
-                .one_or_none()
-            )
+        existing_catatan = (
+            s.query(Catatan)
+            .filter(Catatan.id_absensi == rec.id_absensi)
+            .order_by(Catatan.id_catatan.asc())
+            .all()
+        )
+        kept_rows: list[Catatan] = []
 
-            if catatan_row is None:
-                catatan_row = Catatan(
-                    id_absensi=rec.id_absensi,
-                    deskripsi_catatan=note_desc,
-                    lampiran_url=note_url,
-                )
-                s.add(catatan_row)
-            else:
-                catatan_row.deskripsi_catatan = note_desc
-                catatan_row.lampiran_url = note_url
+        if catatan_entries:
+            for idx, entry in enumerate(catatan_entries):
+                if idx < len(existing_catatan):
+                    row = existing_catatan[idx]
+                    row.deskripsi_catatan = entry["deskripsi_catatan"]
+                    row.lampiran_url = entry["lampiran_url"]
+                else:
+                    row = Catatan(
+                        id_absensi=rec.id_absensi,
+                        deskripsi_catatan=entry["deskripsi_catatan"],
+                        lampiran_url=entry["lampiran_url"],
+                    )
+                    s.add(row)
+                kept_rows.append(row)
 
-            s.flush()
-            catatan_payload = {
-                "id_catatan": catatan_row.id_catatan,
-                "deskripsi_catatan": catatan_row.deskripsi_catatan,
-                "lampiran_url": catatan_row.lampiran_url,
+            for row in existing_catatan[len(catatan_entries):]:
+                s.delete(row)
+        else:
+            for row in existing_catatan:
+                s.delete(row)
+
+        s.flush()
+
+        catatan_payload = [
+            {
+                "id_catatan": row.id_catatan,
+                "deskripsi_catatan": row.deskripsi_catatan,
+                "lampiran_url": row.lampiran_url,
             }
+            for row in kept_rows
+        ]
+
+        existing_catatan = (
+            s.query(Catatan)
+            .filter(Catatan.id_absensi == rec.id_absensi)
+            .order_by(Catatan.id_catatan.asc())
+            .all()
+        )
+        kept_rows: list[Catatan] = []
+
+        if catatan_entries:
+            for idx, entry in enumerate(catatan_entries):
+                if idx < len(existing_catatan):
+                    row = existing_catatan[idx]
+                    row.deskripsi_catatan = entry["deskripsi_catatan"]
+                    row.lampiran_url = entry["lampiran_url"]
+                else:
+                    row = Catatan(
+                        id_absensi=rec.id_absensi,
+                        deskripsi_catatan=entry["deskripsi_catatan"],
+                        lampiran_url=entry["lampiran_url"],
+                    )
+                    s.add(row)
+                kept_rows.append(row)
+
+            for row in existing_catatan[len(catatan_entries):]:
+                s.delete(row)
+        else:
+            for row in existing_catatan:
+                s.delete(row)
+
+        s.flush()
+
+        catatan_payload = [
+            {
+                "id_catatan": row.id_catatan,
+                "deskripsi_catatan": row.deskripsi_catatan,
+                "lampiran_url": row.lampiran_url,
+            }
+            for row in kept_rows
+        ]
 
         # Tautkan agenda_kerja -> absensi (kalau ada yang dikirim saat checkout)
         linked_count, skipped_count = _link_agendas_to_absensi(s, user_id, rec.id_absensi, agenda_ids)
