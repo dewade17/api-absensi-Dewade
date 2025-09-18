@@ -16,39 +16,46 @@ class Role(PyEnum):
     OPERASIONAL = "OPERASIONAL"
     DIREKTUR = "DIREKTUR"
 
-# Role atasan (tanpa KARYAWAN) untuk persetujuan/approval
+
 class AtasanRole(PyEnum):
     HR = "HR"
     OPERASIONAL = "OPERASIONAL"
     DIREKTUR = "DIREKTUR"
+
 
 class CutiType(PyEnum):
     cuti = "cuti"
     sakit = "sakit"
     izin = "izin"
 
+
 class ApproveStatus(PyEnum):
     disetujui = "disetujui"
     ditolak = "ditolak"
     pending = "pending"
+
 
 class WorkStatus(PyEnum):
     berjalan = "berjalan"
     berhenti = "berhenti"
     selesai = "selesai"
 
+
 class ShiftStatus(PyEnum):
     KERJA = "KERJA"
     LIBUR = "LIBUR"
+
 
 class AbsensiStatus(PyEnum):
     tepat = "tepat"
     terlambat = "terlambat"
 
+
 class LemburStatus(PyEnum):
     pending = "pending"
     disetujui = "disetujui"
     ditolak = "ditolak"
+
 
 class Bulan(PyEnum):
     JANUARI = "JANUARI"
@@ -64,17 +71,24 @@ class Bulan(PyEnum):
     NOVEMBER = "NOVEMBER"
     DESEMBER = "DESEMBER"
 
-# Hanya status valid untuk persetujuan laporan absensi
+
 class ReportStatus(PyEnum):
     terkirim = "terkirim"
     disetujui = "disetujui"
     ditolak = "ditolak"
 
-# Status khusus Agenda Kerja
+
 class AgendaStatus(PyEnum):
     diproses = "diproses"
     ditunda = "ditunda"
     selesai = "selesai"
+
+
+# In-app notification only
+class NotificationStatus(PyEnum):
+    unread = "unread"
+    read = "read"
+    archived = "archived"
 
 
 # ===== Models =====
@@ -183,6 +197,12 @@ class PolaKerja(Base):
     jam_mulai = Column(DateTime, nullable=False)
     jam_selesai = Column(DateTime, nullable=False)
 
+    # === Tambahan istirahat ===
+    # Opsional; maks_jam_istirahat direkomendasikan dalam satuan menit
+    jam_istirahat_mulai = Column(DateTime)   # nullable=True
+    jam_istirahat_selesai = Column(DateTime) # nullable=True
+    maks_jam_istirahat = Column(Integer)     # nullable=True
+
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     deleted_at = Column(DateTime)
@@ -196,7 +216,6 @@ class ShiftKerja(Base):
     id_user = Column(String(36), ForeignKey("user.id_user", ondelete="RESTRICT", onupdate="CASCADE"), nullable=False)
     tanggal_mulai = Column(Date)
     tanggal_selesai = Column(Date)
-    # MySQL SET('senin','selasa','rabu','kamis','jumat','sabtu','minggu') disimpan sebagai string
     hari_kerja = Column(String, nullable=False)
     status = Column(Enum(ShiftStatus), nullable=False)
     id_pola_kerja = Column(String(36), ForeignKey("pola_kerja.id_pola_kerja", ondelete="RESTRICT", onupdate="CASCADE"))
@@ -214,7 +233,6 @@ class ShiftKerja(Base):
     )
 
 
-# ===== AGENDA (Master) =====
 class Agenda(Base):
     __tablename__ = "agenda"
     id_agenda = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -224,11 +242,9 @@ class Agenda(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     deleted_at = Column(DateTime)
 
-    # Detail items
     items = relationship("AgendaKerja", back_populates="agenda")
 
 
-# ===== AGENDA_KERJA (Detail) =====
 class AgendaKerja(Base):
     __tablename__ = "agenda_kerja"
     id_agenda_kerja = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -237,17 +253,15 @@ class AgendaKerja(Base):
     id_user = Column(String(36), ForeignKey("user.id_user", ondelete="RESTRICT", onupdate="CASCADE"), nullable=False)
 
     deskripsi_kerja = Column(Text, nullable=False)
-    start_date = Column(DateTime)    # nullable
-    end_date = Column(DateTime)      # nullable
+    start_date = Column(DateTime)
+    end_date = Column(DateTime)
     duration_seconds = Column(Integer)
-
     status = Column(Enum(AgendaStatus), nullable=False)
 
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     deleted_at = Column(DateTime)
 
-    # Relations
     user = relationship("User", back_populates="agendas")
     absensi = relationship("Absensi", back_populates="agendas")
     agenda = relationship("Agenda", back_populates="items")
@@ -297,7 +311,7 @@ class User(Base):
     kantor = relationship("Location", back_populates="users")
 
     faces = relationship("Face", back_populates="user")
-    agendas = relationship("AgendaKerja", back_populates="user")  # tetap pakai nama field lama untuk kompatibilitas
+    agendas = relationship("AgendaKerja", back_populates="user")
     cuti = relationship("Cuti", back_populates="user")
     shifts = relationship("ShiftKerja", back_populates="user")
     story_planners = relationship("StoryPlanner", back_populates="user")
@@ -309,8 +323,10 @@ class User(Base):
     devices = relationship("Device", back_populates="user")
     cuti_approvals = relationship("CutiApproval", back_populates="approver")
     lembur_approvals = relationship("LemburApproval", back_populates="approver")
-
     absensi_reports_received = relationship("AbsensiReportRecipient", back_populates="recipient")
+
+    # in-app notifications
+    notifications = relationship("Notification", back_populates="recipient")
 
     __table_args__ = (
         Index("idx_user_dept", "id_departement"),
@@ -401,9 +417,9 @@ class Absensi(Base):
     lokasiIn = relationship("Location", foreign_keys=[id_lokasi_datang], back_populates="absensi_datang")
     lokasiOut = relationship("Location", foreign_keys=[id_lokasi_pulang], back_populates="absensi_pulang")
 
-    agendas = relationship("AgendaKerja", back_populates="absensi")  # detail agenda per absensi/hari
+    agendas = relationship("AgendaKerja", back_populates="absensi")
     report_recipients = relationship("AbsensiReportRecipient", back_populates="absensi")
-    catatan = relationship("Catatan", back_populates="absensi")  # <- relasi ke tabel catatan
+    catatan = relationship("Catatan", back_populates="absensi")
 
     __table_args__ = (
         UniqueConstraint("id_user", "tanggal", name="uq_absensi_user_tanggal"),
@@ -529,15 +545,13 @@ class ShiftStoryPlanner(Base):
     )
 
 
-# ===== Absensi Report Recipients =====
 class AbsensiReportRecipient(Base):
     __tablename__ = "absensi_report_recipients"
-
     id_absensi_report_recipient = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     id_absensi = Column(String(36), ForeignKey("Absensi.id_absensi", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     id_user = Column(String(36), ForeignKey("user.id_user", ondelete="RESTRICT", onupdate="CASCADE"), nullable=False)
 
-    recipient_role_snapshot = Column(Enum(AtasanRole))  # snapshot hanya HR/OPERASIONAL/DIREKTUR
+    recipient_role_snapshot = Column(Enum(AtasanRole))
     catatan = Column(Text)
     status = Column(Enum(ReportStatus), nullable=False, default=ReportStatus.terkirim)
     notified_at = Column(DateTime)
@@ -558,10 +572,8 @@ class AbsensiReportRecipient(Base):
     )
 
 
-# ===== Catatan Absensi =====
 class Catatan(Base):
     __tablename__ = "catatan"
-
     id_catatan = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     id_absensi = Column(String(36), ForeignKey("Absensi.id_absensi", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     deskripsi_catatan = Column(Text, nullable=False)
@@ -575,4 +587,30 @@ class Catatan(Base):
 
     __table_args__ = (
         Index("idx_catatan_absensi", "id_absensi"),
+    )
+
+
+# ===== In-app Notifications =====
+class Notification(Base):
+    __tablename__ = "notifications"
+    id_notification = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    id_user = Column(String(36), ForeignKey("user.id_user", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    title = Column(String(255), nullable=False)
+    body = Column(Text, nullable=False)
+    data_json = Column(Text)          # JSON payload bebas (string)
+    related_table = Column(String(64))
+    related_id = Column(String(36))
+    status = Column(Enum(NotificationStatus), nullable=False, default=NotificationStatus.unread)
+    seen_at = Column(DateTime)
+    read_at = Column(DateTime)
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    deleted_at = Column(DateTime)
+
+    recipient = relationship("User", back_populates="notifications")
+
+    __table_args__ = (
+        Index("idx_notif_user_status", "id_user", "status", "created_at"),
+        Index("idx_notif_related", "related_table", "related_id"),
     )
