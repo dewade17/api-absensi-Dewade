@@ -59,7 +59,6 @@ def _extract_recipients(req) -> list[str]:
     max_rcp = int(current_app.config.get("MAX_RECIPIENTS_PER_REQUEST", 20))
     return cleaned[:max_rcp]
 
-
 def _extract_catatan_entries(req) -> list[dict[str, str | None]]:
     """Kumpulkan pasangan deskripsi dan lampiran dari permintaan multipart."""
     descs = req.form.getlist("deskripsi_catatan")
@@ -88,7 +87,7 @@ def _extract_catatan_entries(req) -> list[dict[str, str | None]]:
 def _map_to_atasan_role(user: User) -> AtasanRole | None:
     """
     Snapshot role penerima sesuai enum AtasanRole (HR/OPERASIONAL/DIREKTUR).
-    Jika user KARYAWAN atau tidak ada, kembalikan None (sesuai schema prisma).
+    Jika user KARYAWAN atau tidak ada, kembalikan None (sesuai schema).
     """
     if not user or not user.role:
         return None
@@ -109,7 +108,6 @@ def _link_agendas_to_absensi(session, user_id: str, absensi_id: str, agenda_ids:
     if not agenda_ids:
         return 0, 0
 
-    # Ambil semua agenda yg relevan & milik user
     rows = (
         session.query(AgendaKerja)
         .filter(AgendaKerja.id_agenda_kerja.in_(agenda_ids))
@@ -125,9 +123,30 @@ def _link_agendas_to_absensi(session, user_id: str, absensi_id: str, agenda_ids:
             ag.id_absensi = absensi_id
             updated += 1
         else:
-            # sudah tertaut ke absensi (mungkin hari lain) -> skip
             skipped += 1
     return updated, skipped
+
+def _agendas_payload_for_absensi(session, absensi_id: str) -> list[dict]:
+    """Ambil semua agenda_kerja yang sudah tertaut ke absensi tertentu."""
+    rows = (
+        session.query(AgendaKerja)
+        .filter(AgendaKerja.id_absensi == absensi_id)
+        .order_by(AgendaKerja.created_at.asc())
+        .all()
+    )
+    out: list[dict] = []
+    for r in rows:
+        out.append(
+            {
+                "id_agenda_kerja": r.id_agenda_kerja,
+                "id_agenda": r.id_agenda,
+                "deskripsi_kerja": r.deskripsi_kerja,
+                "start_date": r.start_date.isoformat() if getattr(r, "start_date", None) else None,
+                "end_date": r.end_date.isoformat() if getattr(r, "end_date", None) else None,
+                "status": r.status.value if r.status else None,
+            }
+        )
+    return out
 
 # ---------- routes ----------
 @absensi_bp.post("/api/absensi/checkin")
@@ -248,7 +267,7 @@ def checkin():
             agendasSkipped=skipped_count,
             recipientsAdded=added_rcp,
             catatan=catatan_payload,
-                      **v,
+            **v,
         )
 
 
@@ -306,6 +325,8 @@ def checkout():
         rec.out_longitude = lng
         rec.face_verified_pulang = True
 
+        # --- CATATAN ---
+        # Muat catatan yang sudah ada dari checkin
         existing_catatan = (
             s.query(Catatan)
             .filter(Catatan.id_absensi == rec.id_absensi)
@@ -315,6 +336,7 @@ def checkout():
         kept_rows: list[Catatan] = []
 
         if catatan_entries:
+            # Mode "sinkronisasi": urutannya mengikuti kiriman klien
             for idx, entry in enumerate(catatan_entries):
                 if idx < len(existing_catatan):
                     row = existing_catatan[idx]
@@ -329,11 +351,12 @@ def checkout():
                     s.add(row)
                 kept_rows.append(row)
 
+            # Hapus sisa lama jika kiriman lebih sedikit
             for row in existing_catatan[len(catatan_entries):]:
                 s.delete(row)
         else:
-            for row in existing_catatan:
-                s.delete(row)
+            # Tidak ada kiriman catatan baru -> pertahankan catatan hasil checkin
+            kept_rows = list(existing_catatan)
 
         s.flush()
 
@@ -346,50 +369,14 @@ def checkout():
             for row in kept_rows
         ]
 
-        existing_catatan = (
-            s.query(Catatan)
-            .filter(Catatan.id_absensi == rec.id_absensi)
-            .order_by(Catatan.id_catatan.asc())
-            .all()
-        )
-        kept_rows: list[Catatan] = []
-
-        if catatan_entries:
-            for idx, entry in enumerate(catatan_entries):
-                if idx < len(existing_catatan):
-                    row = existing_catatan[idx]
-                    row.deskripsi_catatan = entry["deskripsi_catatan"]
-                    row.lampiran_url = entry["lampiran_url"]
-                else:
-                    row = Catatan(
-                        id_absensi=rec.id_absensi,
-                        deskripsi_catatan=entry["deskripsi_catatan"],
-                        lampiran_url=entry["lampiran_url"],
-                    )
-                    s.add(row)
-                kept_rows.append(row)
-
-            for row in existing_catatan[len(catatan_entries):]:
-                s.delete(row)
-        else:
-            for row in existing_catatan:
-                s.delete(row)
-
-        s.flush()
-
-        catatan_payload = [
-            {
-                "id_catatan": row.id_catatan,
-                "deskripsi_catatan": row.deskripsi_catatan,
-                "lampiran_url": row.lampiran_url,
-            }
-            for row in kept_rows
-        ]
-
-        # Tautkan agenda_kerja -> absensi (kalau ada yang dikirim saat checkout)
+        # --- AGENDA ---
+        # Opsional: tautkan agenda tambahan yang dikirim saat checkout
         linked_count, skipped_count = _link_agendas_to_absensi(s, user_id, rec.id_absensi, agenda_ids)
 
-        # Simpan penerima laporan (absensi_report_recipients)
+        # Selalu ambil semua agenda yang sudah tertaut (termasuk dari checkin)
+        agendas_payload = _agendas_payload_for_absensi(s, rec.id_absensi)
+
+        # --- RECIPIENTS ---
         added_rcp = 0
         if recipients:
             existing = {
@@ -419,10 +406,12 @@ def checkout():
         return ok(
             mode="checkout",
             distanceMeters=dist,
+            jam_pulang=rec.jam_pulang.isoformat() if rec.jam_pulang else None,
             agendasLinked=linked_count,
             agendasSkipped=skipped_count,
             recipientsAdded=added_rcp,
-            catatan=catatan_payload,
+            catatan=catatan_payload,          # SELALU: catatan terkini
+            agendas=agendas_payload,          # SELALU: agenda yang tertaut ke absensi
             **v,
         )
 
