@@ -19,8 +19,8 @@ from ...db.models import (
     User,
     Catatan,
 )
-
-absensi_bp = Blueprint("absensi", __name__)
+        
+absensi_bp = Blueprint("absensi", __name__) 
 
 # ---------- helpers ----------
 def _get_radius(loc: Location) -> int:
