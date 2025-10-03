@@ -18,6 +18,8 @@ from ...db.models import (
     Role,
     User,
     Catatan,
+    ShiftKerja,
+    PolaKerja,
 )
         
 absensi_bp = Blueprint("absensi", __name__) 
@@ -190,6 +192,35 @@ def checkin():
         today = today_local_date()
         now_dt = now_local().replace(tzinfo=None, microsecond=0)
 
+        # --- START: Logika penentuan status masuk ---
+        status_kehadiran = AbsensiStatus.tepat  # Status default adalah 'tepat'
+
+        # Mapping hari dalam seminggu ke format string yang mungkin ada di DB
+        # (0=Senin, 1=Selasa, ..., 6=Minggu)
+        HARI_MAP = {
+            0: "SENIN", 1: "SELASA", 2: "RABU", 3: "KAMIS", 4: "JUMAT", 5: "SABTU", 6: "MINGGU"
+        }
+        nama_hari_ini = HARI_MAP.get(today.weekday())
+
+        jadwal_kerja = None
+        if nama_hari_ini:
+            # Cari jadwal kerja yang aktif untuk user pada hari ini
+            jadwal_kerja = s.query(ShiftKerja).join(PolaKerja).filter(
+                ShiftKerja.id_user == user_id,
+                ShiftKerja.tanggal_mulai <= today,
+                ShiftKerja.tanggal_selesai >= today,
+                ShiftKerja.hari_kerja.contains(nama_hari_ini) # Cek apakah hari ini adalah hari kerja
+            ).first()
+
+        if jadwal_kerja and jadwal_kerja.polaKerja:
+            jam_masuk_seharusnya = jadwal_kerja.polaKerja.jam_mulai.time()
+            jam_checkin_aktual = now_dt.time()
+
+            # Bandingkan jam checkin dengan jadwal
+            if jam_checkin_aktual > jam_masuk_seharusnya:
+                status_kehadiran = AbsensiStatus.terlambat
+        # --- END: Logika penentuan status masuk ---
+
         rec = Absensi(
             id_user=user_id,
             face_verified_masuk=True,
@@ -197,7 +228,7 @@ def checkin():
             tanggal=today,
             id_lokasi_datang=loc.id_location if loc else None,
             jam_masuk=now_dt,
-            status_masuk=AbsensiStatus.tepat,
+            status_masuk=status_kehadiran,
             in_latitude=lat,
             in_longitude=lng,
         )
