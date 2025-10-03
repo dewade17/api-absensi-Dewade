@@ -243,12 +243,15 @@ def checkin():
                 for rid in recipients:
                     if rid in existing:
                         continue
-
-                    u = s.get(User, rid)
+                    
+                    u = s.get(User, rid)        
+                    if u is None:
+                        continue
                     s.add(
                         AbsensiReportRecipient(
                             id_absensi=rec.id_absensi,
                             id_user=rid,
+                            recipient_nama_snapshot=u.nama_pengguna,
                             recipient_role_snapshot=_map_to_atasan_role(u),
                             status=ReportStatus.terkirim,
                         )
@@ -391,10 +394,13 @@ def checkout():
                     continue
 
                 u = s.get(User, rid)
+                if u is None:
+                    continue
                 s.add(
                     AbsensiReportRecipient(
                         id_absensi=rec.id_absensi,
                         id_user=rid,
+                        recipient_nama_snapshot=u.nama_pengguna,
                         recipient_role_snapshot=_map_to_atasan_role(u),
                         status=ReportStatus.terkirim,
                     )
