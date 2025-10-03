@@ -197,7 +197,7 @@ def checkin():
             tanggal=today,
             id_lokasi_datang=loc.id_location if loc else None,
             jam_masuk=now_dt,
-            status=AbsensiStatus.tepat,
+            status_masuk=AbsensiStatus.tepat,
             in_latitude=lat,
             in_longitude=lng,
         )
