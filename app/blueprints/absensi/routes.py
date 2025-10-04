@@ -21,17 +21,20 @@ from ...db.models import (
     Catatan,
     ShiftKerja,
     PolaKerja,
+    Istirahat,  # <-- Tambahkan import model Istirahat
 )
         
 absensi_bp = Blueprint("absensi", __name__) 
 
-# ---------- helpers ----------
+# ---------- helpers (tidak ada perubahan di sini) ----------
 def _get_radius(loc: Location) -> int:
     r = loc.radius if loc and loc.radius is not None else current_app.config.get("DEFAULT_GEOFENCE_RADIUS", 100)
     try:
         return int(r)
     except Exception:
         return 100
+
+# ... (helper lainnya tetap sama) ...
 
 def _extract_agenda_kerja_ids(req) -> list[str]:
     """
@@ -156,7 +159,9 @@ def _agendas_payload_for_absensi(session, absensi_id: str, id_only: bool = False
         )
     return out
 
-# ---------- routes ----------
+
+# ---------- routes absensi (checkin/checkout/status) ----------
+
 @absensi_bp.post("/api/absensi/checkin")
 def checkin():
     user_id = (request.form.get("user_id") or "").strip()
@@ -425,4 +430,169 @@ def absensi_status():
             jam_masuk=rec.jam_masuk.isoformat() if rec.jam_masuk else None,
             jam_pulang=rec.jam_pulang.isoformat() if rec.jam_pulang else None,
             linked_agenda_ids=linked_ids,
-        )   
+        )
+
+# --- ENDPOINT BARU UNTUK FITUR ISTIRAHAT ---
+
+@absensi_bp.post("/api/absensi/istirahat/start")
+def start_istirahat():
+    user_id = (request.form.get("user_id") or "").strip()
+    lat = request.form.get("start_istirahat_latitude", type=float)
+    lng = request.form.get("start_istirahat_longitude", type=float)
+    
+    if not user_id:
+        return error("user_id wajib ada", 400)
+    if lat is None or lng is None:
+        return error("Koordinat latitude dan longitude wajib ada", 400)
+
+    with get_session() as s:
+        try:
+            today = today_local_date()
+            absensi = s.query(Absensi).filter(
+                Absensi.id_user == user_id,
+                Absensi.tanggal == today
+            ).one_or_none()
+
+            if absensi is None or absensi.jam_masuk is None:
+                return error("Anda harus check-in terlebih dahulu sebelum memulai istirahat", 400)
+            if absensi.jam_pulang is not None:
+                return error("Tidak dapat memulai istirahat setelah check-out", 400)
+
+            # Cek apakah sudah ada istirahat yang berjalan
+            existing_break = s.query(Istirahat).filter(
+                Istirahat.id_absensi == absensi.id_absensi,
+                Istirahat.end_istirahat.is_(None)
+            ).first()
+            if existing_break:
+                return error("Anda sudah dalam sesi istirahat", 409)
+
+            now_dt = now_local().replace(tzinfo=None)
+
+            # Validasi jadwal istirahat
+            jadwal_kerja = s.query(ShiftKerja).join(PolaKerja).filter(
+                ShiftKerja.id_user == user_id,
+                ShiftKerja.tanggal_mulai <= today,
+                ShiftKerja.tanggal_selesai >= today
+            ).first()
+
+            if jadwal_kerja and jadwal_kerja.polaKerja:
+                pola = jadwal_kerja.polaKerja
+                if pola.jam_istirahat_mulai and pola.jam_istirahat_selesai:
+                    jam_mulai_seharusnya = pola.jam_istirahat_mulai.time()
+                    jam_selesai_seharusnya = pola.jam_istirahat_selesai.time()
+                    jam_sekarang = now_dt.time()
+                    if not (jam_mulai_seharusnya <= jam_sekarang <= jam_selesai_seharusnya):
+                        return error(f"Waktu istirahat hanya diizinkan antara {jam_mulai_seharusnya.strftime('%H:%M')} dan {jam_selesai_seharusnya.strftime('%H:%M')}", 403)
+
+            new_break = Istirahat(
+                id_user=user_id,
+                id_absensi=absensi.id_absensi,
+                tanggal_istirahat=today,
+                start_istirahat=now_dt,
+                start_istirahat_latitude=lat,
+                start_istirahat_longitude=lng
+            )
+            s.add(new_break)
+            s.commit()
+            s.refresh(new_break)
+
+            return ok(
+                message="Sesi istirahat dimulai",
+                id_istirahat=new_break.id_istirahat,
+                start_istirahat=new_break.start_istirahat.isoformat()
+            )
+
+        except Exception as e:
+            s.rollback()
+            return error(f"Terjadi kesalahan: {str(e)}", 500)
+
+@absensi_bp.post("/api/absensi/istirahat/end")
+def end_istirahat():
+    user_id = (request.form.get("user_id") or "").strip()
+    lat = request.form.get("end_istirahat_latitude", type=float)
+    lng = request.form.get("end_istirahat_longitude", type=float)
+
+    if not user_id:
+        return error("user_id wajib ada", 400)
+    if lat is None or lng is None:
+        return error("Koordinat latitude dan longitude wajib ada", 400)
+        
+    with get_session() as s:
+        try:
+            today = today_local_date()
+            absensi = s.query(Absensi).filter(
+                Absensi.id_user == user_id,
+                Absensi.tanggal == today
+            ).one_or_none()
+
+            if absensi is None:
+                return error("Absensi hari ini tidak ditemukan", 404)
+
+            current_break = s.query(Istirahat).filter(
+                Istirahat.id_absensi == absensi.id_absensi,
+                Istirahat.end_istirahat.is_(None)
+            ).one_or_none()
+
+            if current_break is None:
+                return error("Tidak ada sesi istirahat yang sedang berjalan", 404)
+
+            now_dt = now_local().replace(tzinfo=None)
+            current_break.end_istirahat = now_dt
+            current_break.end_istirahat_latitude = lat
+            current_break.end_istirahat_longitude = lng
+            
+            s.commit()
+
+            duration = (now_dt - current_break.start_istirahat).total_seconds()
+
+            return ok(
+                message="Sesi istirahat selesai",
+                id_istirahat=current_break.id_istirahat,
+                end_istirahat=now_dt.isoformat(),
+                duration_seconds=int(duration)
+            )
+
+        except Exception as e:
+            s.rollback()
+            return error(f"Terjadi kesalahan: {str(e)}", 500)
+
+@absensi_bp.get("/api/absensi/istirahat/status")
+def istirahat_status():
+    user_id = (request.args.get("user_id") or "").strip()
+    if not user_id:
+        return error("user_id wajib ada", 400)
+
+    with get_session() as s:
+        today = today_local_date()
+        
+        # Cari sesi istirahat yang aktif hari ini
+        active_break = s.query(Istirahat).join(Absensi).filter(
+            Absensi.id_user == user_id,
+            Istirahat.tanggal_istirahat == today,
+            Istirahat.end_istirahat.is_(None)
+        ).one_or_none()
+
+        if active_break:
+            duration = (now_local().replace(tzinfo=None) - active_break.start_istirahat).total_seconds()
+            return ok(
+                status="active",
+                id_istirahat=active_break.id_istirahat,
+                start_istirahat=active_break.start_istirahat.isoformat(),
+                elapsed_seconds=int(duration)
+            )
+
+        # Jika tidak ada yang aktif, cek total durasi istirahat hari ini
+        total_duration = 0
+        all_breaks_today = s.query(Istirahat).join(Absensi).filter(
+            Absensi.id_user == user_id,
+            Istirahat.tanggal_istirahat == today,
+            Istirahat.end_istirahat.isnot(None)
+        ).all()
+
+        for b in all_breaks_today:
+            total_duration += (b.end_istirahat - b.start_istirahat).total_seconds()
+
+        return ok(
+            status="inactive",
+            total_duration_seconds=int(total_duration)
+        )
