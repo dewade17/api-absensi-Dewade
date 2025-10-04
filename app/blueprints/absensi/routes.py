@@ -22,10 +22,10 @@ from ...db.models import (
     ShiftKerja,
     PolaKerja,
 )
+        
+absensi_bp = Blueprint("absensi", __name__) 
 
-absensi_bp = Blueprint("absensi", __name__)
-
-# ---------- helpers (tidak ada perubahan) ----------
+# ---------- helpers ----------
 def _get_radius(loc: Location) -> int:
     r = loc.radius if loc and loc.radius is not None else current_app.config.get("DEFAULT_GEOFENCE_RADIUS", 100)
     try:
@@ -129,7 +129,8 @@ def _link_agendas_to_absensi(session, user_id: str, absensi_id: str, agenda_ids:
             skipped += 1
     return updated, skipped
 
-def _agendas_payload_for_absensi(session, absensi_id: str) -> list[dict]:
+# --- PERBAIKAN: Helper ini dimodifikasi agar bisa mengembalikan ID saja ---
+def _agendas_payload_for_absensi(session, absensi_id: str, id_only: bool = False) -> list:
     """Ambil semua agenda_kerja yang sudah tertaut ke absensi tertentu."""
     rows = (
         session.query(AgendaKerja)
@@ -137,6 +138,10 @@ def _agendas_payload_for_absensi(session, absensi_id: str) -> list[dict]:
         .order_by(AgendaKerja.created_at.asc())
         .all()
     )
+    
+    if id_only:
+        return [r.id_agenda_kerja for r in rows]
+
     out: list[dict] = []
     for r in rows:
         out.append(
@@ -150,7 +155,6 @@ def _agendas_payload_for_absensi(session, absensi_id: str) -> list[dict]:
             }
         )
     return out
-
 
 # ---------- routes ----------
 @absensi_bp.post("/api/absensi/checkin")
@@ -277,7 +281,6 @@ def checkin():
             return error("Check-in duplikat untuk tanggal ini (sudah check-in).", 409)
         except Exception as e:
             s.rollback()
-            # Tangkap galat tak terduga lainnya
             return error(f"Terjadi kesalahan internal: {str(e)}", 500)
 
 
@@ -321,11 +324,9 @@ def checkout():
                 if dist > radius:
                     return error(f"Di luar geofence (jarak {int(dist)} m > radius {int(radius)} m)", 400)
 
-            # --- PERBAIKAN 1: BUNGKUS VERIFIKASI WAJAH DALAM TRY-EXCEPT ---
             try:
                 v = verify_user(user_id, f, metric=metric, threshold=threshold)
                 if not v.get("match", False):
-                    # --- PERBAIKAN 2: UBAH STATUS 401 MENJADI 400 ---
                     return error("Verifikasi wajah gagal. Tidak dapat check-out.", 400)
             except Exception as e:
                 return error(f"Gagal melakukan verifikasi wajah: {str(e)}", 500)
@@ -392,7 +393,6 @@ def checkout():
 
 @absensi_bp.get("/api/absensi/status")
 def absensi_status():
-    # ... (tidak ada perubahan di fungsi ini)
     user_id = (request.args.get("user_id") or "").strip()
     if not user_id:
         return error("user_id wajib ada", 400)
@@ -405,7 +405,10 @@ def absensi_status():
         ).one_or_none()
 
         if rec is None:
-            return ok(mode="checkin", today=str(today), jam_masuk=None, jam_pulang=None)
+            return ok(mode="checkin", today=str(today), jam_masuk=None, jam_pulang=None, linked_agenda_ids=[])
+
+        # --- PERBAIKAN: Ambil ID agenda yang sudah tertaut ---
+        linked_ids = _agendas_payload_for_absensi(s, rec.id_absensi, id_only=True)
 
         if rec.jam_pulang is None:
             return ok(
@@ -413,6 +416,7 @@ def absensi_status():
                 today=str(today),
                 jam_masuk=rec.jam_masuk.isoformat() if rec.jam_masuk else None,
                 jam_pulang=None,
+                linked_agenda_ids=linked_ids,
             )
 
         return ok(
@@ -420,4 +424,5 @@ def absensi_status():
             today=str(today),
             jam_masuk=rec.jam_masuk.isoformat() if rec.jam_masuk else None,
             jam_pulang=rec.jam_pulang.isoformat() if rec.jam_pulang else None,
+            linked_agenda_ids=linked_ids,
         )
