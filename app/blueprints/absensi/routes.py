@@ -23,8 +23,8 @@ from ...db.models import (
     PolaKerja,
     Istirahat,
 )
-
-absensi_bp = Blueprint("absensi", __name__)
+        
+absensi_bp = Blueprint("absensi", __name__) 
 
 # ---------- helpers ----------
 def _get_radius(loc: Location) -> int:
@@ -469,17 +469,11 @@ def start_istirahat():
             if jadwal_kerja and jadwal_kerja.polaKerja:
                 pola = jadwal_kerja.polaKerja
                 if pola.jam_istirahat_mulai and pola.jam_istirahat_selesai:
-                    local_tz = now_local_dt.tzinfo
                     
                     # --- PERBAIKAN DI SINI ---
-                    # 1. Anggap waktu dari DB adalah UTC, lalu buat menjadi "aware".
-                    jam_mulai_utc = pola.jam_istirahat_mulai.replace(tzinfo=timezone.utc)
-                    jam_selesai_utc = pola.jam_istirahat_selesai.replace(tzinfo=timezone.utc)
-
-                    # 2. Konversi dari UTC ke timezone lokal server.
-                    jam_mulai_seharusnya = jam_mulai_utc.astimezone(local_tz).time()
-                    jam_selesai_seharusnya = jam_selesai_utc.astimezone(local_tz).time()
-                    
+                    # Langsung ambil komponen waktu (.time()) karena data di DB sudah dalam waktu lokal
+                    jam_mulai_seharusnya = pola.jam_istirahat_mulai.time()
+                    jam_selesai_seharusnya = pola.jam_istirahat_selesai.time()
                     jam_sekarang = now_local_dt.time()
                     
                     if not (jam_mulai_seharusnya <= jam_sekarang <= jam_selesai_seharusnya):
