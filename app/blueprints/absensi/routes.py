@@ -425,4 +425,4 @@ def absensi_status():
             jam_masuk=rec.jam_masuk.isoformat() if rec.jam_masuk else None,
             jam_pulang=rec.jam_pulang.isoformat() if rec.jam_pulang else None,
             linked_agenda_ids=linked_ids,
-        )
+        )   

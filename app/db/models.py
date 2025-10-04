@@ -506,8 +506,10 @@ class Istirahat(Base):
     tanggal_istirahat = Column(Date, nullable=False)
     start_istirahat = Column(DateTime, nullable=False)
     end_istirahat = Column(DateTime)
-    istirahat_latitude = Column(DECIMAL(10, 6))
-    istirahat_longitude = Column(DECIMAL(10, 6))
+    start_istirahat_latitude = Column(DECIMAL(10, 6))
+    start_istirahat_longitude = Column(DECIMAL(10, 6))
+    end_istirahat_latitude = Column(DECIMAL(10, 6))
+    end_istirahat_longitude = Column(DECIMAL(10, 6))
 
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
