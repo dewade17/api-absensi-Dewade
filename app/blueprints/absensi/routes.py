@@ -21,7 +21,7 @@ from ...db.models import (
     Catatan,
     ShiftKerja,
     PolaKerja,
-    Istirahat,  # <-- Tambahkan import model Istirahat
+    Istirahat,
 )
         
 absensi_bp = Blueprint("absensi", __name__) 
@@ -466,7 +466,8 @@ def start_istirahat():
             if existing_break:
                 return error("Anda sudah dalam sesi istirahat", 409)
 
-            now_dt = now_local().replace(tzinfo=None)
+            now_local_dt = now_local()
+            now_dt = now_local_dt.replace(tzinfo=None)
 
             # Validasi jadwal istirahat
             jadwal_kerja = s.query(ShiftKerja).join(PolaKerja).filter(
@@ -478,9 +479,13 @@ def start_istirahat():
             if jadwal_kerja and jadwal_kerja.polaKerja:
                 pola = jadwal_kerja.polaKerja
                 if pola.jam_istirahat_mulai and pola.jam_istirahat_selesai:
-                    jam_mulai_seharusnya = pola.jam_istirahat_mulai.time()
-                    jam_selesai_seharusnya = pola.jam_istirahat_selesai.time()
-                    jam_sekarang = now_dt.time()
+                    # --- PERBAIKAN ZONA WAKTU ---
+                    local_tz = now_local_dt.tzinfo
+                    
+                    jam_mulai_seharusnya = pola.jam_istirahat_mulai.astimezone(local_tz).time()
+                    jam_selesai_seharusnya = pola.jam_istirahat_selesai.astimezone(local_tz).time()
+                    jam_sekarang = now_local_dt.time()
+                    
                     if not (jam_mulai_seharusnya <= jam_sekarang <= jam_selesai_seharusnya):
                         return error(f"Waktu istirahat hanya diizinkan antara {jam_mulai_seharusnya.strftime('%H:%M')} dan {jam_selesai_seharusnya.strftime('%H:%M')}", 403)
 
