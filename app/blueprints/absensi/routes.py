@@ -26,15 +26,13 @@ from ...db.models import (
         
 absensi_bp = Blueprint("absensi", __name__) 
 
-# ---------- helpers (tidak ada perubahan di sini) ----------
+# ---------- helpers ----------
 def _get_radius(loc: Location) -> int:
     r = loc.radius if loc and loc.radius is not None else current_app.config.get("DEFAULT_GEOFENCE_RADIUS", 100)
     try:
         return int(r)
     except Exception:
         return 100
-
-# ... (helper lainnya tetap sama) ...
 
 def _extract_agenda_kerja_ids(req) -> list[str]:
     """
@@ -132,7 +130,6 @@ def _link_agendas_to_absensi(session, user_id: str, absensi_id: str, agenda_ids:
             skipped += 1
     return updated, skipped
 
-# --- PERBAIKAN: Helper ini dimodifikasi agar bisa mengembalikan ID saja ---
 def _agendas_payload_for_absensi(session, absensi_id: str, id_only: bool = False) -> list:
     """Ambil semua agenda_kerja yang sudah tertaut ke absensi tertentu."""
     rows = (
@@ -196,20 +193,16 @@ def checkin():
                 if dist > radius:
                     return error(f"Di luar geofence (jarak {int(dist)} m > radius {int(radius)} m)", 400)
 
-            # --- PERBAIKAN 1: BUNGKUS VERIFIKASI WAJAH DALAM TRY-EXCEPT ---
             try:
                 v = verify_user(user_id, f, metric=metric, threshold=threshold)
                 if not v.get("match", False):
-                    # --- PERBAIKAN 2: UBAH STATUS 401 MENJADI 400 ---
                     return error("Verifikasi wajah gagal. Tidak dapat check-in.", 400)
             except Exception as e:
-                # Tangkap error lain dari service (misal: file tidak ditemukan)
                 return error(f"Gagal melakukan verifikasi wajah: {str(e)}", 500)
 
             today = today_local_date()
             now_dt = now_local().replace(tzinfo=None, microsecond=0)
 
-            # --- Logika penentuan status masuk ---
             status_kehadiran = AbsensiStatus.tepat
             HARI_MAP = {0: "SENIN", 1: "SELASA", 2: "RABU", 3: "KAMIS", 4: "JUMAT", 5: "SABTU", 6: "MINGGU"}
             nama_hari_ini = HARI_MAP.get(today.weekday())
@@ -242,7 +235,7 @@ def checkin():
             )
             s.add(rec)
             
-            s.flush()  # dapatkan rec.id_absensi
+            s.flush()
 
             catatan_payload: list[dict[str, str | None]] = []
             if catatan_entries:
@@ -412,7 +405,6 @@ def absensi_status():
         if rec is None:
             return ok(mode="checkin", today=str(today), jam_masuk=None, jam_pulang=None, linked_agenda_ids=[])
 
-        # --- PERBAIKAN: Ambil ID agenda yang sudah tertaut ---
         linked_ids = _agendas_payload_for_absensi(s, rec.id_absensi, id_only=True)
 
         if rec.jam_pulang is None:
@@ -458,7 +450,6 @@ def start_istirahat():
             if absensi.jam_pulang is not None:
                 return error("Tidak dapat memulai istirahat setelah check-out", 400)
 
-            # Cek apakah sudah ada istirahat yang berjalan
             existing_break = s.query(Istirahat).filter(
                 Istirahat.id_absensi == absensi.id_absensi,
                 Istirahat.end_istirahat.is_(None)
@@ -469,7 +460,6 @@ def start_istirahat():
             now_local_dt = now_local()
             now_dt = now_local_dt.replace(tzinfo=None)
 
-            # Validasi jadwal istirahat
             jadwal_kerja = s.query(ShiftKerja).join(PolaKerja).filter(
                 ShiftKerja.id_user == user_id,
                 ShiftKerja.tanggal_mulai <= today,
@@ -479,7 +469,6 @@ def start_istirahat():
             if jadwal_kerja and jadwal_kerja.polaKerja:
                 pola = jadwal_kerja.polaKerja
                 if pola.jam_istirahat_mulai and pola.jam_istirahat_selesai:
-                    # --- PERBAIKAN ZONA WAKTU ---
                     local_tz = now_local_dt.tzinfo
                     
                     jam_mulai_seharusnya = pola.jam_istirahat_mulai.astimezone(local_tz).time()
@@ -548,19 +537,18 @@ def end_istirahat():
             
             s.commit()
 
-            duration = (now_dt - current_break.start_istirahat).total_seconds()
-
             return ok(
                 message="Sesi istirahat selesai",
                 id_istirahat=current_break.id_istirahat,
-                end_istirahat=now_dt.isoformat(),
-                duration_seconds=int(duration)
+                end_istirahat=now_dt.isoformat()
             )
 
         except Exception as e:
             s.rollback()
             return error(f"Terjadi kesalahan: {str(e)}", 500)
 
+
+# --- PERUBAHAN UTAMA DI SINI ---
 @absensi_bp.get("/api/absensi/istirahat/status")
 def istirahat_status():
     user_id = (request.args.get("user_id") or "").strip()
@@ -570,34 +558,50 @@ def istirahat_status():
     with get_session() as s:
         today = today_local_date()
         
-        # Cari sesi istirahat yang aktif hari ini
-        active_break = s.query(Istirahat).join(Absensi).filter(
-            Absensi.id_user == user_id,
-            Istirahat.tanggal_istirahat == today,
-            Istirahat.end_istirahat.is_(None)
-        ).one_or_none()
+        # Helper untuk serialisasi objek Istirahat ke dictionary
+        def serialize_istirahat(b: Istirahat):
+            data = {
+                "id_istirahat": b.id_istirahat,
+                "tanggal_istirahat": b.tanggal_istirahat.isoformat(),
+                "start_istirahat": b.start_istirahat.isoformat(),
+                "start_istirahat_latitude": float(b.start_istirahat_latitude) if b.start_istirahat_latitude is not None else None,
+                "start_istirahat_longitude": float(b.start_istirahat_longitude) if b.start_istirahat_longitude is not None else None,
+                "end_istirahat": None,
+                "end_istirahat_latitude": None,
+                "end_istirahat_longitude": None,
+                "duration_seconds": None,
+            }
+            if b.end_istirahat:
+                data["end_istirahat"] = b.end_istirahat.isoformat()
+                data["end_istirahat_latitude"] = float(b.end_istirahat_latitude) if b.end_istirahat_latitude is not None else None
+                data["end_istirahat_longitude"] = float(b.end_istirahat_longitude) if b.end_istirahat_longitude is not None else None
+                data["duration_seconds"] = int((b.end_istirahat - b.start_istirahat).total_seconds())
+            return data
 
-        if active_break:
-            duration = (now_local().replace(tzinfo=None) - active_break.start_istirahat).total_seconds()
-            return ok(
-                status="active",
-                id_istirahat=active_break.id_istirahat,
-                start_istirahat=active_break.start_istirahat.isoformat(),
-                elapsed_seconds=int(duration)
-            )
-
-        # Jika tidak ada yang aktif, cek total durasi istirahat hari ini
-        total_duration = 0
+        # Ambil SEMUA sesi istirahat untuk pengguna pada hari ini
         all_breaks_today = s.query(Istirahat).join(Absensi).filter(
             Absensi.id_user == user_id,
-            Istirahat.tanggal_istirahat == today,
-            Istirahat.end_istirahat.isnot(None)
-        ).all()
+            Istirahat.tanggal_istirahat == today
+        ).order_by(Istirahat.start_istirahat.asc()).all()
+
+        active_break = None
+        history = []
+        total_duration = 0
 
         for b in all_breaks_today:
-            total_duration += (b.end_istirahat - b.start_istirahat).total_seconds()
+            serialized = serialize_istirahat(b)
+            history.append(serialized)
+            if b.end_istirahat is None:
+                active_break = serialized
+            else:
+                total_duration += serialized["duration_seconds"]
+
+        # Tentukan status utama
+        status = "active" if active_break else "inactive"
 
         return ok(
-            status="inactive",
-            total_duration_seconds=int(total_duration)
+            status=status,
+            active_break=active_break,
+            history=history,
+            total_duration_seconds=total_duration,
         )
