@@ -1,6 +1,6 @@
 # flask_api_face/app/blueprints/absensi/routes.py
 
-from datetime import datetime, date as _date
+from datetime import datetime, date as _date, timezone # <-- TAMBAHAN: import timezone
 from flask import Blueprint, request, current_app
 from sqlalchemy.exc import IntegrityError
 from ...utils.responses import ok, error
@@ -23,8 +23,8 @@ from ...db.models import (
     PolaKerja,
     Istirahat,
 )
-        
-absensi_bp = Blueprint("absensi", __name__) 
+
+absensi_bp = Blueprint("absensi", __name__)
 
 # ---------- helpers ----------
 def _get_radius(loc: Location) -> int:
@@ -429,7 +429,7 @@ def absensi_status():
 @absensi_bp.post("/api/absensi/istirahat/start")
 def start_istirahat():
     user_id = (request.form.get("user_id") or "").strip()
-    lat = request.form.get("start_istirahat_latitude", type=float)
+    lat = request.form.get("start_istirahat_latitude", type=float)  
     lng = request.form.get("start_istirahat_longitude", type=float)
     
     if not user_id:
@@ -471,8 +471,15 @@ def start_istirahat():
                 if pola.jam_istirahat_mulai and pola.jam_istirahat_selesai:
                     local_tz = now_local_dt.tzinfo
                     
-                    jam_mulai_seharusnya = pola.jam_istirahat_mulai.astimezone(local_tz).time()
-                    jam_selesai_seharusnya = pola.jam_istirahat_selesai.astimezone(local_tz).time()
+                    # --- PERBAIKAN DI SINI ---
+                    # 1. Anggap waktu dari DB adalah UTC, lalu buat menjadi "aware".
+                    jam_mulai_utc = pola.jam_istirahat_mulai.replace(tzinfo=timezone.utc)
+                    jam_selesai_utc = pola.jam_istirahat_selesai.replace(tzinfo=timezone.utc)
+
+                    # 2. Konversi dari UTC ke timezone lokal server.
+                    jam_mulai_seharusnya = jam_mulai_utc.astimezone(local_tz).time()
+                    jam_selesai_seharusnya = jam_selesai_utc.astimezone(local_tz).time()
+                    
                     jam_sekarang = now_local_dt.time()
                     
                     if not (jam_mulai_seharusnya <= jam_sekarang <= jam_selesai_seharusnya):
