@@ -1,3 +1,5 @@
+# flask_api_face/app/__init__.py
+
 from flask import Flask
 from .config import load_config
 from .extensions import db, cors, init_supabase, init_face_engine, init_firebase
@@ -20,7 +22,7 @@ def create_app():
     init_face_engine(app)
     init_firebase(app)
     
-    # Impor model atau modul yang bergantung pada app context di sini jika perlu
+    # Impor modul yang bergantung pada app context (seperti event listener)
     from .db import timestamps 
 
     # Daftarkan blueprint
