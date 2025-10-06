@@ -25,11 +25,11 @@ notification_templates = [
         'placeholders': '{nama_karyawan}, {periode_mulai}, {periode_selesai}',
     },
     {
-      'eventTrigger': 'SHIFT_UPDATED',
-      'description': 'Info saat ada perubahan pada jadwal shift karyawan',
-      'titleTemplate': '🔄 Perubahan Jadwal Shift',
-      'bodyTemplate': 'Perhatian, shift Anda pada tanggal {tanggal_shift} diubah menjadi {nama_shift} ({jam_masuk} - {jam_pulang}).',
-      'placeholders': '{nama_karyawan}, {tanggal_shift}, {nama_shift}, {jam_masuk}, {jam_pulang}',
+    'eventTrigger': 'SHIFT_UPDATED',
+    'description': 'Info saat ada perubahan pada jadwal shift karyawan',
+    'titleTemplate': '🔄 Perubahan Jadwal Shift',
+    'bodyTemplate': 'Perhatian, shift Anda pada tanggal {tanggal_shift} diubah menjadi {nama_shift} ({jam_masuk} - {jam_pulang}).',
+    'placeholders': '{nama_karyawan}, {tanggal_shift}, {nama_shift}, {jam_masuk}, {jam_pulang}',
     },
     {
         'eventTrigger': 'SHIFT_REMINDER_H1',
