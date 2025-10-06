@@ -13,7 +13,7 @@ from ...utils.timez import now_local
 face_bp = Blueprint("face", __name__)
 
 
-@face_bp.post("/enroll")
+@face_bp.post("/api/face/enroll")
 def enroll():
     user_id = (request.form.get("user_id") or "").strip()
     if not user_id:
@@ -118,7 +118,7 @@ def enroll():
         return error(str(e), 400)
 
 
-@face_bp.post("/verify")
+@face_bp.post("/api/face/verify")
 def verify():
     user_id = (request.form.get("user_id") or "").strip()
     metric = (request.form.get("metric") or "cosine").lower()
@@ -140,7 +140,7 @@ def verify():
         return error(str(e), 400)
 
 
-@face_bp.get("/<user_id>")
+@face_bp.get("/api/face/<user_id>")
 def get_face_data(user_id: str):
     user_id = (user_id or "").strip()
     if not user_id:
