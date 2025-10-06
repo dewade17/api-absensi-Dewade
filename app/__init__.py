@@ -2,7 +2,7 @@
 
 from flask import Flask
 from .config import load_config
-from .extensions import db, cors, init_supabase, init_face_engine, init_firebase
+from .extensions import cors, init_supabase, init_face_engine, init_firebase
 from .middleware.error_handlers import register_error_handlers
 from .blueprints.face.routes import face_bp
 from .blueprints.absensi.routes import absensi_bp
@@ -14,7 +14,6 @@ def create_app():
     load_config(app)
     
     # Inisialisasi ekstensi dengan app
-    db.init_app(app)
     cors.init_app(app)
 
     # Inisialisasi layanan

@@ -1,7 +1,7 @@
 from typing import Optional
 from flask import current_app
 from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy
+
 from supabase import create_client, Client
 from insightface.app import FaceAnalysis
 import firebase_admin
@@ -9,7 +9,7 @@ from firebase_admin import credentials
 import json
 
 # Buat instance ekstensi di tingkat global
-db = SQLAlchemy()
+
 cors = CORS()
 
 # Variabel global untuk klien/engine yang diinisialisasi sekali

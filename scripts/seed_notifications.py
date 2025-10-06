@@ -2,8 +2,9 @@
 
 from sqlalchemy import select
 from app import create_app
+from app.db import get_session
 from app.db.models import NotificationTemplate
-from app.extensions import db
+
 
 # Daftar template notifikasi default
 notification_templates = [
@@ -93,25 +94,27 @@ notification_templates = [
 def seed_notifications():
     """Seed the notification_templates table with default templates."""
     print("Memulai seeding template notifikasi...")
-    for template_data in notification_templates:
-        # Cek apakah template sudah ada menggunakan db.session
-        stmt = select(NotificationTemplate).where(NotificationTemplate.event_trigger == template_data['eventTrigger'])
-        exists = db.session.execute(stmt).scalar_one_or_none()
-        
-        if not exists:
-            # Jika belum ada, buat baru
-            template = NotificationTemplate(**template_data)
-            db.session.add(template)
-            print(f"Template dibuat: {template_data['eventTrigger']}")
-        else:
-            # Jika sudah ada, perbarui deskripsi, judul, dan isi (opsional, bisa dihapus jika tidak mau update)
-            exists.description = template_data['description']
-            exists.titleTemplate = template_data['titleTemplate']
-            exists.bodyTemplate = template_data['bodyTemplate']
-            exists.placeholders = template_data.get('placeholders') # Gunakan .get() untuk keamanan
-            print(f"Template sudah ada, diperbarui: {template_data['eventTrigger']}")
-            
-    db.session.commit()
+    with get_session() as session:
+        for template_data in notification_templates:
+            # Cek apakah template sudah ada menggunakan session SQLAlchemy
+            stmt = select(NotificationTemplate).where(NotificationTemplate.event_trigger == template_data['event_trigger'])
+            exists = session.execute(stmt).scalar_one_or_none()
+
+            if not exists:
+                # Jika belum ada, buat baru
+                template = NotificationTemplate(**template_data)
+                session.add(template)
+                print(f"Template dibuat: {template_data['event_trigger']}")
+            else:
+                # Jika sudah ada, perbarui deskripsi, judul, dan isi
+                exists.description = template_data['description']
+                exists.title_template = template_data['title_template']
+                exists.body_template = template_data['body_template']
+                exists.placeholders = template_data.get('placeholders')
+                exists.is_active = template_data.get('is_active', exists.is_active)
+                print(f"Template sudah ada, diperbarui: {template_data['event_trigger']}")
+
+        session.commit()
     print("Seeding template notifikasi selesai.")
 
 if __name__ == '__main__':
