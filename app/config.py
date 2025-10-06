@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+load_dotenv()
 
 class BaseConfig:
     # Env & DB
@@ -24,7 +25,7 @@ class ProdConfig(BaseConfig):
     DEBUG = False
 
 def load_config(app):
-    load_dotenv()
+
     env = os.getenv("FLASK_ENV", "development").lower()
     if env == "production":
         app.config.from_object(ProdConfig)
