@@ -1,81 +1,109 @@
-"""
-Script untuk memasukkan template notifikasi awal ke database.
+from app import create_app
+from app.db.models import NotificationTemplate
+from app.extensions import db
 
-Jalankan skrip ini dengan context Python di root aplikasi Flask. Skrip akan
-melakukan upsert (insert jika tidak ada) terhadap setiap template yang
-didefinisikan di ``notificationTemplates``. Jika sebuah template sudah
-terdaftar (berdasarkan ``event_trigger``), skrip tidak akan mengubahnya.
-
-Contoh penggunaan:
-
-    python -m flask_api_face.scripts.seed_notifications
-"""
-
-from ..db import get_session
-from ..db.models import NotificationTemplate
-
-
-notificationTemplates = [
+# Daftar template notifikasi default
+notification_templates = [
+    # --- Notifikasi Wajah (BARU) ---
     {
-        "event_trigger": "REMINDER_CHECK_IN",
-        "description": "Pengingat 15 menit sebelum jam masuk",
-        "title_template": "⏰ Jangan Lupa Absen Masuk!",
-        "body_template": "Shift kerja Anda akan dimulai pukul {jam_masuk}. Segera lakukan absensi check-in.",
-        "placeholders": "{nama_karyawan}, {jam_masuk}",
+        'eventTrigger': 'FACE_REGISTRATION_SUCCESS',
+        'description': 'Konfirmasi saat karyawan berhasil mendaftarkan wajah',
+        'titleTemplate': '✅ Wajah Berhasil Terdaftar',
+        'bodyTemplate': 'Halo {nama_karyawan}, wajah Anda telah berhasil terdaftar pada sistem E-HRM. Anda kini dapat menggunakan fitur absensi wajah.',
+        'placeholders': '{nama_karyawan}',
+    },
+    # --- Shift Kerja ---
+    {
+        'eventTrigger': 'NEW_SHIFT_PUBLISHED',
+        'description': 'Info saat jadwal shift baru diterbitkan untuk karyawan',
+        'titleTemplate': '📄 Jadwal Shift Baru Telah Terbit',
+        'bodyTemplate': 'Jadwal shift kerja Anda untuk periode {periode_mulai} - {periode_selesai} telah tersedia. Silakan periksa.',
+        'placeholders': '{nama_karyawan}, {periode_mulai}, {periode_selesai}',
     },
     {
-        "event_trigger": "SUCCESS_CHECK_IN",
-        "description": "Konfirmasi saat berhasil check-in",
-        "title_template": "✅ Absen Masuk Berhasil",
-        "body_template": "Anda berhasil check-in pada pukul {waktu_checkin}. Selamat bekerja, {nama_karyawan}!",
-        "placeholders": "{nama_karyawan}, {waktu_checkin}",
+      'eventTrigger': 'SHIFT_UPDATED',
+      'description': 'Info saat ada perubahan pada jadwal shift karyawan',
+      'titleTemplate': '🔄 Perubahan Jadwal Shift',
+      'bodyTemplate': 'Perhatian, shift Anda pada tanggal {tanggal_shift} diubah menjadi {nama_shift} ({jam_masuk} - {jam_pulang}).',
+      'placeholders': '{nama_karyawan}, {tanggal_shift}, {nama_shift}, {jam_masuk}, {jam_pulang}',
     },
     {
-        "event_trigger": "LATE_CHECK_IN",
-        "description": "Notifikasi saat karyawan check-in terlambat",
-        "title_template": "⚠️ Anda Terlambat Masuk",
-        "body_template": "Anda tercatat check-in pada pukul {waktu_checkin}, melewati jadwal masuk Anda pukul {jam_masuk}.",
-        "placeholders": "{nama_karyawan}, {waktu_checkin}, {jam_masuk}",
+        'eventTrigger': 'SHIFT_REMINDER_H1',
+        'description': 'Pengingat H-1 sebelum jadwal shift karyawan',
+        'titleTemplate': '📢 Pengingat Shift Besok',
+        'bodyTemplate': 'Jangan lupa, besok Anda masuk kerja pada shift {nama_shift} pukul {jam_masuk}.',
+        'placeholders': '{nama_karyawan}, {nama_shift}, {jam_masuk}',
+    },
+    # --- Agenda Kerja ---
+    {
+        'eventTrigger': 'NEW_AGENDA_ASSIGNED',
+        'description': 'Notifikasi saat karyawan diberikan agenda kerja baru',
+        'titleTemplate': '✍️ Agenda Kerja Baru',
+        'bodyTemplate': 'Anda mendapatkan tugas baru: "{judul_agenda}". Batas waktu pengerjaan hingga {tanggal_deadline}.',
+        'placeholders': '{nama_karyawan}, {judul_agenda}, {tanggal_deadline}, {pemberi_tugas}',
     },
     {
-        "event_trigger": "REMINDER_CHECK_OUT",
-        "description": "Pengingat 15 menit sebelum jam pulang",
-        "title_template": "⏰ Waktunya Absen Pulang",
-        "body_template": "Shift kerja Anda akan berakhir pukul {jam_pulang}. Jangan lupa lakukan absensi check-out.",
-        "placeholders": "{nama_karyawan}, {jam_pulang}",
+        'eventTrigger': 'AGENDA_REMINDER_H1',
+        'description': 'Pengingat H-1 sebelum deadline agenda kerja',
+        'titleTemplate': '🔔 Pengingat Agenda Kerja',
+        'bodyTemplate': 'Jangan lupa, agenda "{judul_agenda}" akan jatuh tempo besok. Segera perbarui statusnya.',
+        'placeholders': '{nama_karyawan}, {judul_agenda}',
     },
     {
-        "event_trigger": "SUCCESS_CHECK_OUT",
-        "description": "Konfirmasi saat berhasil check-out",
-        "title_template": "✅ Absen Pulang Berhasil",
-        "body_template": "Anda berhasil melakukan check-out pada pukul {waktu_checkout}. Terima kasih untuk hari ini.",
-        "placeholders": "{nama_karyawan}, {waktu_checkout}",
+        'eventTrigger': 'AGENDA_OVERDUE',
+        'description': 'Notifikasi saat agenda kerja melewati batas waktu',
+        'titleTemplate': '⏰ Agenda Melewati Batas Waktu',
+        'bodyTemplate': 'Perhatian, agenda kerja "{judul_agenda}" telah melewati batas waktu pengerjaan.',
+        'placeholders': '{nama_karyawan}, {judul_agenda}',
     },
     {
-        "event_trigger": "MISSED_CHECK_IN",
-        "description": "Notifikasi jika karyawan tidak melakukan check-in",
-        "title_template": "❗ Anda Belum Absen Masuk",
-        "body_template": "Sistem mencatat Anda belum melakukan check-in untuk shift hari ini. Mohon konfirmasi ke atasan Anda.",
-        "placeholders": "{nama_karyawan}",
+        'eventTrigger': 'AGENDA_COMMENTED',
+        'description': 'Notifikasi saat atasan/rekan memberi komentar pada agenda',
+        'titleTemplate': '💬 Komentar Baru pada Agenda',
+        'bodyTemplate': '{nama_komentator} memberikan komentar pada agenda "{judul_agenda}". Silakan periksa detailnya.',
+        'placeholders': '{nama_karyawan}, {judul_agenda}, {nama_komentator}',
+    },
+    # --- Istirahat ---
+    {
+        'eventTrigger': 'SUCCESS_START_BREAK',
+        'description': 'Konfirmasi saat karyawan memulai istirahat',
+        'titleTemplate': '☕ Istirahat Dimulai',
+        'bodyTemplate': 'Anda memulai istirahat pada pukul {waktu_mulai_istirahat}. Selamat menikmati waktu istirahat Anda!',
+        'placeholders': '{nama_karyawan}, {waktu_mulai_istirahat}',
+    },
+    {
+        'eventTrigger': 'SUCCESS_END_BREAK',
+        'description': 'Konfirmasi saat karyawan mengakhiri istirahat',
+        'titleTemplate': '✅ Istirahat Selesai',
+        'bodyTemplate': 'Anda telah mengakhiri istirahat pada pukul {waktu_selesai_istirahat}. Selamat melanjutkan pekerjaan!',
+        'placeholders': '{nama_karyawan}, {waktu_selesai_istirahat}',
+    },
+    {
+        'eventTrigger': 'BREAK_TIME_EXCEEDED',
+        'description': 'Notifikasi jika durasi istirahat melebihi batas',
+        'titleTemplate': '❗ Waktu Istirahat Berlebih',
+        'bodyTemplate': 'Perhatian, durasi istirahat Anda telah melebihi batas maksimal {maks_jam_istirahat} menit yang ditentukan.',
+        'placeholders': '{nama_karyawan}, {maks_jam_istirahat}',
     },
 ]
 
+def seed_notifications():
+    """Seed the notification_templates table with default templates."""
+    print("Memulai seeding template notifikasi...")
+    for template_data in notification_templates:
+        # Cek apakah template sudah ada
+        exists = NotificationTemplate.query.filter_by(eventTrigger=template_data['eventTrigger']).first()
+        if not exists:
+            # Jika belum ada, buat baru
+            template = NotificationTemplate(**template_data)
+            db.session.add(template)
+            print(f"Template dibuat: {template_data['eventTrigger']}")
+        else:
+            print(f"Template sudah ada, dilewati: {template_data['eventTrigger']}")
+    db.session.commit()
+    print("Seeding template notifikasi selesai.")
 
-def seed_templates():
-    """Masukkan template notifikasi ke database jika belum ada."""
-    with get_session() as session:
-        for tpl in notificationTemplates:
-            existing = (
-                session.query(NotificationTemplate)
-                .filter(NotificationTemplate.event_trigger == tpl["event_trigger"])
-                .one_or_none()
-            )
-            if existing:
-                continue
-            rec = NotificationTemplate(**tpl)
-            session.add(rec)
-        session.commit()
-
-
-if __name__ == "__main__":
-    seed_templates()
+if __name__ == '__main__':
+    app = create_app()
+    with app.app_context():
+        seed_notifications()
