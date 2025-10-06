@@ -26,7 +26,7 @@ def create_app():
     from .db import timestamps 
 
     # Daftarkan blueprint
-    app.register_blueprint(face_bp, url_prefix="/api/face")
+    app.register_blueprint(face_bp)
     app.register_blueprint(absensi_bp)
     app.register_blueprint(location_bp)
     app.register_blueprint(notif_bp)
