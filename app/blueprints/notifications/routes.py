@@ -1,89 +1,121 @@
-import os
-import firebase_admin
-from firebase_admin import messaging
-from app.db.models import Notification, Device, NotificationTemplate
-from app.extensions import db
+# flask_api_face/app/blueprints/notifications/routes.py
 
-def format_message(template, data):
+from flask import Blueprint, request
+from sqlalchemy import select, update
+from ...db import get_session
+from ...db.models import Device, Notification
+from ...utils.responses import ok, error
+from ...utils.auth_utils import token_required, get_user_id_from_auth
+from ...utils.timez import now_local
+
+notif_bp = Blueprint("notifications", __name__)
+
+@notif_bp.post("/api/device/register")
+@token_required
+def register_device():
     """
-    Mengganti placeholder di dalam string template dengan data dinamis.
-    Contoh: template="Halo, {nama}!", data={"nama": "Budi"} -> "Halo, Budi!"
+    Mendaftarkan atau memperbarui token FCM untuk sebuah perangkat.
     """
-    if not template:
-        return ''
-    message = template
-    for key, value in data.items():
-        message = message.replace(f'{{{key}}}', str(value))
-    return message
+    user_id = get_user_id_from_auth()
+    payload = request.get_json()
+    if not payload:
+        return error("JSON body tidak valid", 400)
 
-def send_notification(event_trigger, user_id, dynamic_data):
-    """
-    Service utama untuk mengirim notifikasi ke pengguna.
+    fcm_token = (payload.get("fcm_token") or "").strip()
+    device_identifier = (payload.get("device_identifier") or "").strip()
 
-    Args:
-        event_trigger (str): Kode unik pemicu (cth: 'NEW_AGENDA_ASSIGNED').
-        user_id (str): ID pengguna penerima.
-        dynamic_data (dict): Data untuk mengisi placeholder di template.
-    """
-    # Pastikan Firebase sudah diinisialisasi sebelum mencoba mengirim
-    if not firebase_admin._apps:
-        print(f"Firebase tidak diinisialisasi. Melewatkan notifikasi untuk event: {event_trigger}")
-        return
+    if not fcm_token:
+        return error("Field 'fcm_token' wajib ada", 400)
 
-    try:
-        # 1. Ambil template notifikasi dari database
-        template = NotificationTemplate.query.filter_by(eventTrigger=event_trigger, isActive=True).first()
-
-        title = f"Pemberitahuan Baru: {event_trigger}" # Default title
-        body = "Anda memiliki pembaruan baru di aplikasi E-HRM." # Default body
-
-        if template:
-            print(f"Menggunakan template dari DB untuk [{event_trigger}].")
-            title = format_message(template.titleTemplate, dynamic_data)
-            body = format_message(template.bodyTemplate, dynamic_data)
-        else:
-            print(f"Peringatan: Template untuk [{event_trigger}] tidak ditemukan atau tidak aktif. Menggunakan pesan default.")
-
-        # 2. Simpan riwayat notifikasi ke database
-        new_notif = Notification(id_user=user_id, title=title, body=body)
-        db.session.add(new_notif)
-        db.session.commit()
-        print(f"Notifikasi untuk [{event_trigger}] berhasil disimpan ke DB untuk user {user_id}.")
-
-        # 3. Ambil semua token FCM milik pengguna yang aktif
-        devices = Device.query.filter_by(id_user=user_id, push_enabled=True).filter(Device.fcm_token.isnot(None)).all()
-        tokens = [device.fcm_token for device in devices]
-
-        if not tokens:
-            print(f"Tidak ada token FCM yang ditemukan untuk user {user_id}. Notifikasi push tidak dikirim.")
-            return
-
-        # 4. Buat pesan push notification
-        message = messaging.MulticastMessage(
-            notification=messaging.Notification(title=title, body=body),
-            tokens=tokens,
-            android=messaging.AndroidConfig(
-                notification=messaging.AndroidNotification(sound='default')
-            ),
-            apns=messaging.APNSConfig(
-                payload=messaging.APNSPayload(
-                    aps=messaging.Aps(sound='default')
+    with get_session() as s:
+        device = None
+        if device_identifier:
+            device = s.execute(
+                select(Device).where(
+                    Device.id_user == user_id,
+                    Device.device_identifier == device_identifier
                 )
-            )
-        )
+            ).scalar_one_or_none()
 
-        # 5. Kirim notifikasi menggunakan Firebase Admin SDK
-        response = messaging.send_multicast(message)
-        print(f"Notifikasi push [{event_trigger}] berhasil dikirim ke {response.success_count} perangkat untuk user {user_id}.")
+        now_naive_utc = now_local().replace(tzinfo=None)
         
-        if response.failure_count > 0:
-            responses = response.responses
-            failed_tokens = []
-            for idx, resp in enumerate(responses):
-                if not resp.success:
-                    failed_tokens.append(tokens[idx])
-            print('Daftar token yang gagal:', failed_tokens)
+        if device:
+            # Update device
+            device.fcm_token = fcm_token
+            device.fcm_token_updated_at = now_naive_utc
+            device.last_seen = now_naive_utc
+            device.platform = payload.get("platform")
+            device.os_version = payload.get("os_version")
+            device.app_version = payload.get("app_version")
+            device.device_label = payload.get("device_label")
+            msg = "Token perangkat diperbarui"
+        else:
+            # Create new device
+            device = Device(
+                id_user=user_id,
+                fcm_token=fcm_token,
+                device_identifier=device_identifier,
+                platform=payload.get("platform"),
+                os_version=payload.get("os_version"),
+                app_version=payload.get("app_version"),
+                device_label=payload.get("device_label"),
+                fcm_token_updated_at=now_naive_utc,
+                last_seen=now_naive_utc,
+            )
+            s.add(device)
+            msg = "Perangkat berhasil didaftarkan"
+            
+        s.commit()
+        s.refresh(device)
 
-    except Exception as e:
-        db.session.rollback()
-        print(f"Gagal mengirim notifikasi {event_trigger} untuk user {user_id}: {e}")
+        return ok(message=msg, device_id=device.id_device)
+
+@notif_bp.get("/api/notifications")
+@token_required
+def get_notifications():
+    """
+    Mengambil daftar notifikasi untuk pengguna yang terautentikasi.
+    """
+    user_id = get_user_id_from_auth()
+    with get_session() as s:
+        
+        notifications = s.execute(
+            select(Notification)
+            .where(Notification.id_user == user_id)
+            .order_by(Notification.created_at.desc())
+        ).scalars().all()
+        
+        def to_dict(n: Notification):
+            return {
+                "id_notification": n.id_notification,
+                "title": n.title,
+                "body": n.body,
+                "created_at": n.created_at.isoformat(),
+                "read_at": n.read_at.isoformat() if n.read_at else None,
+                "status": n.status.value if n.status else None,
+            }
+
+        return ok(items=[to_dict(n) for n in notifications])
+
+@notif_bp.put("/api/notifications/<string:notification_id>/read")
+@token_required
+def mark_as_read(notification_id: str):
+    """
+    Menandai notifikasi sebagai 'read'.
+    """
+    user_id = get_user_id_from_auth()
+    with get_session() as s:
+        result = s.query(Notification).filter(
+            Notification.id_notification == notification_id,
+            Notification.id_user == user_id
+        ).one_or_none()
+
+        if not result:
+            return error("Notifikasi tidak ditemukan atau Anda tidak punya akses", 404)
+
+        if not result.read_at:
+            result.read_at = now_local().replace(tzinfo=None)
+            result.status = "read"
+            s.commit()
+
+        return ok(message="Notifikasi ditandai sebagai sudah dibaca")

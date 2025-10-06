@@ -1,85 +1,87 @@
 from typing import Optional
-from flask_cors import CORS
-from supabase import create_client, Client
 from flask import current_app
+from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
+from supabase import create_client, Client
 from insightface.app import FaceAnalysis
+import firebase_admin
+from firebase_admin import credentials
+import json
 
+# Buat instance ekstensi di tingkat global
+db = SQLAlchemy()
 cors = CORS()
 
+# Variabel global untuk klien/engine yang diinisialisasi sekali
 _supabase: Optional[Client] = None
 _engine: Optional[FaceAnalysis] = None
+_firebase_app = None
 
 def init_supabase(app):
+    """Menginisialisasi dan menyimpan klien Supabase."""
     global _supabase
     url = app.config.get("SUPABASE_URL")
     key = app.config.get("SUPABASE_SERVICE_ROLE_KEY")
     if url and key:
         _supabase = create_client(url, key)
+    else:
+        print("Peringatan: Kredensial Supabase tidak ditemukan.")
 
 def get_supabase() -> Optional[Client]:
     return _supabase
 
 def init_face_engine(app):
+    """Menginisialisasi mesin pengenalan wajah."""
     global _engine
     model = app.config.get("MODEL_NAME", "buffalo_l")
     engine = FaceAnalysis(name=model, providers=["CPUExecutionProvider"])
     engine.prepare(ctx_id=0)
     _engine = engine
+    print(f"Mesin pengenalan wajah diinisialisasi dengan model: {model}")
 
 def get_face_engine() -> FaceAnalysis:
     if _engine is None:
-        model = current_app.config.get("MODEL_NAME", "buffalo_l")
-        engine = FaceAnalysis(name=model, providers=["CPUExecutionProvider"])
-        engine.prepare(ctx_id=0)
-        return engine
+        # Inisialisasi darurat jika belum diinisialisasi
+        init_face_engine(current_app)
     return _engine
 
-# -----------------------------------------------------------------------------
-# Firebase Admin initialization
-# -----------------------------------------------------------------------------
-# The `_firebase_app` global holds the initialized Firebase app instance. It is
-# configured in ``init_firebase``. If firebase_admin is not installed or no
-# credential is provided, notifications will be silently disabled.
-_firebase_app = None
-
 def init_firebase(app):
-    """Initialize Firebase Admin SDK if credentials are provided.
-
-    This function looks for the following configuration keys on ``app.config``:
-
-    - ``FIREBASE_SERVICE_ACCOUNT_JSON``: A JSON string containing the service
-      account credentials.
-    - ``FIREBASE_CREDENTIALS_PATH``: Path to a JSON file with service
-      account credentials.
-
-    If either is present and firebase_admin can be imported, a Firebase
-    application will be initialized and stored in the module-level
-    ``_firebase_app`` variable. Subsequent calls are no-ops.
-    """
+    """Menginisialisasi Firebase Admin SDK."""
     global _firebase_app
-    if _firebase_app is not None:
-        return
-    try:
-        from firebase_admin import credentials, initialize_app  # type: ignore
-    except Exception:
-        # firebase_admin is not installed; skip initialization.
+    if firebase_admin._apps:
+        _firebase_app = firebase_admin.get_app()
         return
 
-    import json
-
-    creds_json = app.config.get("FIREBASE_SERVICE_ACCOUNT_JSON")
-    creds_path = app.config.get("FIREBASE_CREDENTIALS_PATH")
+    # Logika untuk memuat kredensial dari .env atau file
     cred = None
-    if creds_json:
+    creds_json_str = app.config.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+    creds_path = app.config.get("FIREBASE_CREDENTIALS_PATH")
+    
+    # Prioritaskan dari variabel env JSON string
+    if creds_json_str:
         try:
-            data = json.loads(creds_json)
-            cred = credentials.Certificate(data)
-        except Exception:
-            cred = None
-    if cred is None and creds_path:
+            cred_dict = json.loads(creds_json_str)
+            cred = credentials.Certificate(cred_dict)
+            print("Memuat kredensial Firebase dari FIREBASE_SERVICE_ACCOUNT_JSON.")
+        except json.JSONDecodeError:
+            print("Peringatan: Gagal mem-parsing FIREBASE_SERVICE_ACCOUNT_JSON.")
+    
+    # Fallback ke path file jika JSON string tidak ada atau gagal
+    if not cred and creds_path:
         try:
             cred = credentials.Certificate(creds_path)
-        except Exception:
-            cred = None
-    if cred is not None:
-        _firebase_app = initialize_app(cred)
+            print(f"Memuat kredensial Firebase dari path: {creds_path}.")
+        except FileNotFoundError:
+            print(f"Peringatan: File kredensial Firebase tidak ditemukan di: {creds_path}.")
+        except Exception as e:
+            print(f"Peringatan: Gagal memuat kredensial Firebase dari file: {e}")
+
+    if cred:
+        try:
+            _firebase_app = firebase_admin.initialize_app(cred)
+            print("Firebase Admin SDK berhasil diinisialisasi.")
+        except Exception as e:
+            print(f"Error saat menginisialisasi Firebase Admin SDK: {e}")
+    else:
+        print("Peringatan: Tidak ada kredensial Firebase yang valid ditemukan. Notifikasi push dinonaktifkan.")
+
