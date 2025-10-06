@@ -1,45 +1,39 @@
-import os
 from flask import Flask
-from dotenv import load_dotenv
+from .config import load_config
+from .extensions import cors, init_supabase, init_face_engine, init_firebase
+from .middleware.error_handlers import register_error_handlers
+from .blueprints.face.routes import face_bp
+from .blueprints.absensi.routes import absensi_bp
+from .blueprints.location.routes import location_bp
+from .blueprints.notifications.routes import notif_bp
 
-# Muat variabel lingkungan dari .env
-load_dotenv()
-
-def create_app(config_class=None):
-    """
-    Factory function untuk membuat instance aplikasi Flask.
-    """
+def create_app():
     app = Flask(__name__)
+    load_config(app)
+    from .db import timestamps 
+    cors.init_app(app)
+    init_supabase(app)
+    init_face_engine(app)
+    # Initialize Firebase Admin SDK (if configured). This must be called
+    # after app.config is loaded but before sending any notifications.
+    init_firebase(app)
+    
+    app.register_blueprint(face_bp)
+    app.register_blueprint(absensi_bp)
+    app.register_blueprint(location_bp)
+    app.register_blueprint(notif_bp)
 
-    # Konfigurasi aplikasi
-    if config_class is None:
-        app.config.from_object('app.config.Config')
-    else:
-        app.config.from_object(config_class)
-
-    # Inisialisasi ekstensi
-    from .extensions import db
-    db.init_app(app)
-
-    # Inisialisasi Firebase Admin SDK
-    from .firebase import initialize_firebase
-    with app.app_context():
-        initialize_firebase()
-
-    # Registrasi middleware
-    from .middleware.error_handlers import register_error_handlers
     register_error_handlers(app)
 
-    # Registrasi blueprint
-    from .blueprints.face.routes import face_bp
-    from .blueprints.absensi.routes import absensi_bp
-    from .blueprints.location.routes import location_bp
-    from .blueprints.notifications.routes import notifications_bp
-
-    app.register_blueprint(face_bp, url_prefix='/api/face')
-    app.register_blueprint(absensi_bp, url_prefix='/api/absensi')
-    app.register_blueprint(location_bp, url_prefix='/api/location')
-    app.register_blueprint(notifications_bp, url_prefix='/api/notifications')
-
+    @app.get("/health")
+    def health():
+        from .extensions import get_supabase
+        return {
+            "ok": True,
+            "engine": app.config.get("MODEL_NAME"),
+            "supabase": bool(get_supabase()),
+            "bucket": app.config.get("SUPABASE_BUCKET")
+        }
 
     return app
+
