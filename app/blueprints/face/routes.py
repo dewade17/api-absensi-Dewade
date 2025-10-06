@@ -104,6 +104,7 @@ def enroll():
                 event_trigger='FACE_REGISTRATION_SUCCESS',
                 user_id=user_id,
                 dynamic_data={'nama_karyawan': user_name}
+                session=s
             )
         except Exception as e:
             # Jika notifikasi gagal, cukup catat log error tanpa menggagalkan respons utama
