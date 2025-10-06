@@ -5,7 +5,7 @@ from app import create_app
 from app.db.models import NotificationTemplate
 from app.extensions import db
 
-# Daftar template notifikasi default (tetap sama)
+# Daftar template notifikasi default
 notification_templates = [
     # --- Notifikasi Wajah (BARU) ---
     {
@@ -94,8 +94,8 @@ def seed_notifications():
     """Seed the notification_templates table with default templates."""
     print("Memulai seeding template notifikasi...")
     for template_data in notification_templates:
-        # Cek apakah template sudah ada menggunakan db.session (CARA BARU)
-        stmt = select(NotificationTemplate).where(NotificationTemplate.eventTrigger == template_data['eventTrigger'])
+        # Cek apakah template sudah ada menggunakan db.session
+        stmt = select(NotificationTemplate).where(NotificationTemplate.event_trigger == template_data['eventTrigger'])
         exists = db.session.execute(stmt).scalar_one_or_none()
         
         if not exists:
@@ -104,7 +104,12 @@ def seed_notifications():
             db.session.add(template)
             print(f"Template dibuat: {template_data['eventTrigger']}")
         else:
-            print(f"Template sudah ada, dilewati: {template_data['eventTrigger']}")
+            # Jika sudah ada, perbarui deskripsi, judul, dan isi (opsional, bisa dihapus jika tidak mau update)
+            exists.description = template_data['description']
+            exists.titleTemplate = template_data['titleTemplate']
+            exists.bodyTemplate = template_data['bodyTemplate']
+            exists.placeholders = template_data.get('placeholders') # Gunakan .get() untuk keamanan
+            print(f"Template sudah ada, diperbarui: {template_data['eventTrigger']}")
             
     db.session.commit()
     print("Seeding template notifikasi selesai.")
