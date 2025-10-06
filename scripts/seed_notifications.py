@@ -112,6 +112,17 @@ def ensure_notification_template_schema(session) -> None:
         existing_columns = {
             column.name for column in NotificationTemplate.__table__.columns
         }
+        if "eventTrigger" in existing_columns and "event_trigger" not in existing_columns:
+            print("Menyesuaikan kolom legacy 'eventTrigger' menjadi 'event_trigger'...")
+        session.execute(
+            text(
+                "ALTER TABLE notification_templates "
+                "CHANGE COLUMN eventTrigger event_trigger VARCHAR(64) NULL DEFAULT NULL"
+            )
+        )
+        session.commit()
+        existing_columns.remove("eventTrigger")
+        existing_columns.add("event_trigger")
 
     column_ddl: Dict[str, str] = {
         "event_trigger": "ALTER TABLE notification_templates ADD COLUMN event_trigger VARCHAR(64) NULL",
