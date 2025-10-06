@@ -1,8 +1,11 @@
+# flask_api_face/scripts/seed_notifications.py
+
+from sqlalchemy import select
 from app import create_app
 from app.db.models import NotificationTemplate
 from app.extensions import db
 
-# Daftar template notifikasi default
+# Daftar template notifikasi default (tetap sama)
 notification_templates = [
     # --- Notifikasi Wajah (BARU) ---
     {
@@ -91,8 +94,10 @@ def seed_notifications():
     """Seed the notification_templates table with default templates."""
     print("Memulai seeding template notifikasi...")
     for template_data in notification_templates:
-        # Cek apakah template sudah ada
-        exists = NotificationTemplate.query.filter_by(eventTrigger=template_data['eventTrigger']).first()
+        # Cek apakah template sudah ada menggunakan db.session (CARA BARU)
+        stmt = select(NotificationTemplate).where(NotificationTemplate.eventTrigger == template_data['eventTrigger'])
+        exists = db.session.execute(stmt).scalar_one_or_none()
+        
         if not exists:
             # Jika belum ada, buat baru
             template = NotificationTemplate(**template_data)
@@ -100,6 +105,7 @@ def seed_notifications():
             print(f"Template dibuat: {template_data['eventTrigger']}")
         else:
             print(f"Template sudah ada, dilewati: {template_data['eventTrigger']}")
+            
     db.session.commit()
     print("Seeding template notifikasi selesai.")
 

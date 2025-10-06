@@ -103,7 +103,7 @@ def enroll():
             send_notification(
                 event_trigger='FACE_REGISTRATION_SUCCESS',
                 user_id=user_id,
-                dynamic_data={'nama_karyawan': user_name}
+                dynamic_data={'nama_karyawan': user_name},
                 session=s
             )
         except Exception as e:
