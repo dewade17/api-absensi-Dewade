@@ -7,6 +7,7 @@ from ...utils.responses import ok, error
 from ...utils.geo import haversine_m
 from ...utils.timez import now_local, today_local_date
 from ...services.face_service import verify_user
+from ...services.notification_service import send_notification  # BARU
 from ...db import get_session
 from ...db.models import (
     Location,
@@ -207,7 +208,10 @@ def checkin():
             HARI_MAP = {0: "SENIN", 1: "SELASA", 2: "RABU", 3: "KAMIS", 4: "JUMAT", 5: "SABTU", 6: "MINGGU"}
             nama_hari_ini = HARI_MAP.get(today.weekday())
 
+            # Siapkan variabel jadwal_kerja dan jam_masuk_seharusnya untuk digunakan di bawah.
             jadwal_kerja = None
+            jam_masuk_seharusnya = None  # simpan jam masuk dari pola kerja jika ada
+
             if nama_hari_ini:
                 jadwal_kerja = s.query(ShiftKerja).join(PolaKerja).filter(
                     ShiftKerja.id_user == user_id,
@@ -217,6 +221,7 @@ def checkin():
                 ).first()
 
             if jadwal_kerja and jadwal_kerja.polaKerja and jadwal_kerja.polaKerja.jam_mulai:
+                # Ambil jam masuk seharusnya (waktu lokal) untuk kebutuhan notifikasi
                 jam_masuk_seharusnya = jadwal_kerja.polaKerja.jam_mulai.time()
                 jam_checkin_aktual = now_dt.time()
                 if jam_checkin_aktual > jam_masuk_seharusnya:
@@ -264,6 +269,29 @@ def checkin():
                     added_rcp += 1
 
             s.commit()
+
+            # Setelah data tersimpan, kirim notifikasi ke user
+            try:
+                user = s.get(User, user_id)
+                if user:
+                    if status_kehadiran == AbsensiStatus.terlambat:
+                        # Notifikasi terlambat masuk
+                        dyn = {
+                            "nama_karyawan": user.nama_pengguna,
+                            "waktu_checkin": now_dt.strftime("%H:%M"),
+                            "jam_masuk": jam_masuk_seharusnya.strftime("%H:%M") if jam_masuk_seharusnya else "",
+                        }
+                        send_notification("LATE_CHECK_IN", user_id, dyn, s)
+                    else:
+                        # Notifikasi sukses check-in
+                        dyn = {
+                            "nama_karyawan": user.nama_pengguna,
+                            "waktu_checkin": now_dt.strftime("%H:%M"),
+                        }
+                        send_notification("SUCCESS_CHECK_IN", user_id, dyn, s)
+            except Exception:
+                # Jika terjadi error saat mengirim notifikasi, jangan gagalkan proses absensi
+                pass
 
             return ok(
                 mode="checkin",
@@ -372,6 +400,18 @@ def checkout():
                     added_rcp += 1
 
             s.commit()
+
+            # Kirim notifikasi sukses check-out
+            try:
+                user = s.get(User, user_id)
+                if user:
+                    dyn = {
+                        "nama_karyawan": user.nama_pengguna,
+                        "waktu_checkout": now_dt.strftime("%H:%M"),
+                    }
+                    send_notification("SUCCESS_CHECK_OUT", user_id, dyn, s)
+            except Exception:
+                pass
 
             return ok(
                 mode="checkout",

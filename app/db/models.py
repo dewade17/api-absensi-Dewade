@@ -699,6 +699,35 @@ class Notification(Base):
     )
 
 
+# BARU: Template Notifikasi
+#
+# Model ini menyimpan template notifikasi yang dapat dikonfigurasi oleh
+# administrator. Mirip dengan model `notification_templates` di backend
+# Next.js, ia menyimpan kode pemicu (`event_trigger`), deskripsi singkat
+# untuk HR, template judul, template isi, daftar placeholder yang dapat
+# digunakan dalam template, dan status aktif. Template default dapat diisi
+# melalui skrip seeding. Service notifikasi akan mengambil baris ini
+# berdasarkan `event_trigger` dan mengganti placeholder dengan data dinamis.
+class NotificationTemplate(Base):
+    __tablename__ = "notification_templates"
+
+    id = Column(CHAR(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # Kode unik yang digunakan untuk memicu template, misal: "REMINDER_CHECK_IN"
+    event_trigger = Column(String(64), unique=True, nullable=False)
+    # Deskripsi internal untuk HR/admin
+    description = Column(String(255), nullable=False)
+    # Template judul pesan; placeholder dibungkus dengan {..}
+    title_template = Column(String(255), nullable=False)
+    # Template isi pesan; placeholder dibungkus dengan {..}
+    body_template = Column(Text, nullable=False)
+    # Daftar placeholder yang tersedia, disimpan dalam satu string (opsional)
+    placeholders = Column(String(255))
+    # Menandakan apakah template aktif. Jika false, template tidak digunakan.
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+
 class Lembur(Base):
     __tablename__ = "Lembur"
     id_lembur = Column(CHAR(36), primary_key=True, default=lambda: str(uuid.uuid4()))
