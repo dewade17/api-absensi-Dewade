@@ -25,10 +25,10 @@ Response akan mengembalikan ``{ ok: True, message: "Device token registered" }``
 """
 
 from flask import Blueprint, request
-from ..utils.responses import ok, error
-from ..db import get_session
-from ..db.models import Device
-from ..utils.timez import now_local
+from ...utils.responses import ok, error
+from ...db import get_session
+from ...db.models import Device
+from ...utils.timez import now_local
 
 notif_bp = Blueprint("notifications", __name__)
 
