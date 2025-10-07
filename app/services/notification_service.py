@@ -7,11 +7,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 from firebase_admin import messaging
-# Pastikan Firebase Admin SDK telah diinisialisasi sebelum mengirim
-# notifikasi. Fungsi initialize_firebase() akan memanggil
-# firebase_admin.initialize_app() hanya jika aplikasi belum ada. Dengan
-# memanggilnya di sini, kita mencegah error "The default Firebase app
-# does not exist" ketika messaging.send_multicast dijalankan.
+# Pastikan Firebase Admin SDK telah diinisialisasi sebelum mengirim notifikasi.
 from ..firebase import initialize_firebase
 from sqlalchemy.orm import Session
 
@@ -30,15 +26,21 @@ def _format_message(template: str, data: Dict[str, Any]) -> str:
 
 
 def send_notification(event_trigger: str, user_id: str, dynamic_data: Dict[str, Any], session: Session) -> None:
-    """Kirim notifikasi push untuk pengguna tertentu."""
+    """
+    Kirim notifikasi push untuk pengguna tertentu.
 
-    # Inisialisasi Firebase Admin SDK jika belum
+    Fungsi ini mencari template berdasarkan `event_trigger`, mengambil daftar token
+    FCM aktif untuk pengguna, kemudian menyusun pesan dan mengirimkannya
+    menggunakan API terbaru `send_each_for_multicast()` dari Firebase Admin SDK.
+    """
+
+    # Inisialisasi Firebase Admin SDK jika belum diinisialisasi.
     try:
         initialize_firebase()
     except Exception:
-        # Jika inisialisasi gagal kita tetap melanjutkan; error akan
-        # ditangani saat pengiriman notifikasi
         pass
+
+    # Ambil template notifikasi yang aktif sesuai event trigger.
     template: NotificationTemplate | None = (
         session.query(NotificationTemplate)
         .filter(
@@ -50,6 +52,7 @@ def send_notification(event_trigger: str, user_id: str, dynamic_data: Dict[str, 
     if not template:
         return
 
+    # Ambil device FCM tokens untuk user yang bersangkutan yang masih aktif.
     devices = (
         session.query(Device)
         .filter(
@@ -63,9 +66,11 @@ def send_notification(event_trigger: str, user_id: str, dynamic_data: Dict[str, 
     if not tokens:
         return
 
+    # Format judul dan isi pesan dengan mengganti placeholder pada template.
     title = _format_message(template.title_template, dynamic_data)
     body = _format_message(template.body_template, dynamic_data)
 
+    # Simpan notifikasi ke database untuk keperluan log/riwayat.
     notif = Notification(
         id_user=user_id,
         title=title,
@@ -76,34 +81,41 @@ def send_notification(event_trigger: str, user_id: str, dynamic_data: Dict[str, 
     session.add(notif)
     session.commit()
 
-    try:
-        # --- PERUBAHAN UTAMA DI SINI ---
-        # Siapkan payload 'data' untuk service worker.
-        # Kuncinya harus string, dan nilainya juga harus string.
-        data_payload = {
-            "title": title,
-            "body": body,
-            # Anda bisa menambahkan data lain di sini jika diperlukan oleh aplikasi klien
-            # Misalnya, URL untuk dibuka saat notifikasi di-klik
-            "url": "/", 
-        }
+    # Bangun payload data tambahan yang akan diterima oleh service worker.
+    data_payload = {
+        "title": title,
+        "body": body,
+        # Tambahkan data lain (mis. URL) sesuai kebutuhan aplikasi klien.
+        "url": "/",
+    }
 
-        message = messaging.MulticastMessage(
-            tokens=tokens,
-            # Payload 'notification' untuk saat aplikasi di foreground
-            notification=messaging.Notification(title=title, body=body),
-            # Payload 'data' untuk saat aplikasi di background/terminated
-            data=data_payload,
-            android=messaging.AndroidConfig(
-                notification=messaging.AndroidNotification(sound="default")
+    # Susun objek MulticastMessage. Properti `notification` dipakai saat
+    # aplikasi di foreground, sedangkan properti `data` dipakai oleh service
+    # worker ketika aplikasi di background/terminated.
+    message = messaging.MulticastMessage(
+        tokens=tokens,
+        notification=messaging.Notification(title=title, body=body),
+        data=data_payload,
+        android=messaging.AndroidConfig(
+            notification=messaging.AndroidNotification(sound="default")
+        ),
+        apns=messaging.APNSConfig(
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(sound="default", content_available=True)
             ),
-            apns=messaging.APNSConfig(
-                payload=messaging.APNSPayload(aps=messaging.Aps(sound="default", content_available=True)),
-            ),
-        )
-        messaging.send_multicast(message)
-        # --- AKHIR PERUBAHAN ---
+        ),
+    )
+
+    try:
+        # Gunakan API baru send_each_for_multicast() untuk mengirim pesan ke setiap
+        # token. Ini menggantikan send_multicast() yang telah dihapus pada
+        # Firebase Admin SDK v7.0.0.
+        responses = messaging.send_each_for_multicast(message)
+        # Hitung jumlah keberhasilan/gagal untuk keperluan logging (opsional).
+        success_count = sum(1 for r in responses if r.success)
+        failure_count = len(responses) - success_count
+        # Cetak ringkasan kirim. Ini bisa diganti dengan logging.
+        print(f"Notifikasi dikirim: {success_count} sukses, {failure_count} gagal")
     except Exception as e:
-        # Sebaiknya log error ini untuk debugging di masa depan
+        # Tangkap dan log exception tanpa menghentikan alur aplikasi.
         print(f"Gagal mengirim notifikasi FCM: {e}")
-        pass
