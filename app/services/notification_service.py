@@ -7,6 +7,12 @@ from datetime import datetime
 from typing import Any, Dict
 
 from firebase_admin import messaging
+# Pastikan Firebase Admin SDK telah diinisialisasi sebelum mengirim
+# notifikasi. Fungsi initialize_firebase() akan memanggil
+# firebase_admin.initialize_app() hanya jika aplikasi belum ada. Dengan
+# memanggilnya di sini, kita mencegah error "The default Firebase app
+# does not exist" ketika messaging.send_multicast dijalankan.
+from ..firebase import initialize_firebase
 from sqlalchemy.orm import Session
 
 from ..db.models import NotificationTemplate, Device, Notification
@@ -25,6 +31,14 @@ def _format_message(template: str, data: Dict[str, Any]) -> str:
 
 def send_notification(event_trigger: str, user_id: str, dynamic_data: Dict[str, Any], session: Session) -> None:
     """Kirim notifikasi push untuk pengguna tertentu."""
+
+    # Inisialisasi Firebase Admin SDK jika belum
+    try:
+        initialize_firebase()
+    except Exception:
+        # Jika inisialisasi gagal kita tetap melanjutkan; error akan
+        # ditangani saat pengiriman notifikasi
+        pass
     template: NotificationTemplate | None = (
         session.query(NotificationTemplate)
         .filter(
