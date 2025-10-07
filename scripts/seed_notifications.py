@@ -102,30 +102,41 @@ def ensure_notification_template_schema(session) -> None:
     inspector = inspect(session.bind)
 
     try:
+        # Periksa kolom yang ada pada tabel notification_templates. Jika tabel belum
+        # tersedia akan dilempar NoSuchTableError.
         existing_columns = {
             column["name"] for column in inspector.get_columns("notification_templates")
         }
     except NoSuchTableError:
+        # Tabel belum dibuat, buat tabel baru dari definisi model
         print("Tabel notification_templates belum ada. Membuat tabel...")
         NotificationTemplate.__table__.create(session.bind, checkfirst=True)
         session.commit()
         existing_columns = {
             column.name for column in NotificationTemplate.__table__.columns
         }
-        if "eventTrigger" in existing_columns and "event_trigger" not in existing_columns:
-            print("Menyesuaikan kolom legacy 'eventTrigger' menjadi 'event_trigger'...")
-            session.execute(
-                text(
-                    "ALTER TABLE notification_templates "
-                    "CHANGE COLUMN eventTrigger event_trigger VARCHAR(64) NULL DEFAULT NULL"
-                )
-            )
-            session.commit()
-            existing_columns.remove("eventTrigger")
-            existing_columns.add("event_trigger")
 
-        elif "eventTrigger" in existing_columns and "event_trigger" in existing_columns:
-            print(
+    # -- Penanganan skema lama --
+    # Dalam beberapa versi sebelumnya kolom bernama 'eventTrigger' (camelCase) digunakan
+    # dan terdapat indeks unik pada kolom tersebut (notification_templates_eventTrigger_key).
+    # Untuk memastikan skema konsisten kami perlu memindahkan nilai ke kolom baru
+    # 'event_trigger' (snake_case) dan menghapus kolom serta indeks lama.
+    if "eventTrigger" in existing_columns and "event_trigger" not in existing_columns:
+        # Hanya ada kolom eventTrigger, ubah nama kolom tersebut menjadi event_trigger
+        print("Menyesuaikan kolom legacy 'eventTrigger' menjadi 'event_trigger'...")
+        session.execute(
+            text(
+                "ALTER TABLE notification_templates "
+                "CHANGE COLUMN eventTrigger event_trigger VARCHAR(64) NULL DEFAULT NULL"
+            )
+        )
+        session.commit()
+        existing_columns.remove("eventTrigger")
+        existing_columns.add("event_trigger")
+
+    elif "eventTrigger" in existing_columns and "event_trigger" in existing_columns:
+        # Kedua kolom ada; salin nilai dari eventTrigger ke event_trigger jika kolom baru kosong
+        print(
             "Menyalin nilai dari kolom legacy 'eventTrigger' ke 'event_trigger' jika diperlukan..."
         )
         session.execute(
@@ -139,10 +150,22 @@ def ensure_notification_template_schema(session) -> None:
         session.commit()
         print("Menghapus kolom legacy 'eventTrigger' yang sudah tidak digunakan...")
         session.execute(
-            text("ALTER TABLE notification_templates " "DROP COLUMN eventTrigger")
+            text("ALTER TABLE notification_templates DROP COLUMN eventTrigger")
         )
         session.commit()
         existing_columns.remove("eventTrigger")
+
+    # Hapus indeks unik lama pada kolom eventTrigger jika masih ada
+    indexes = {index["name"] for index in inspector.get_indexes("notification_templates")}
+    if "notification_templates_eventTrigger_key" in indexes:
+        print("Menghapus indeks unik lama 'notification_templates_eventTrigger_key'...")
+        session.execute(
+            text(
+                "ALTER TABLE notification_templates DROP INDEX notification_templates_eventTrigger_key"
+            )
+        )
+        session.commit()
+        indexes.remove("notification_templates_eventTrigger_key")
 
     column_ddl: Dict[str, str] = {
         "event_trigger": "ALTER TABLE notification_templates ADD COLUMN event_trigger VARCHAR(64) NULL",
