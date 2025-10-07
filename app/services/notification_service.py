@@ -1,23 +1,4 @@
-"""
-Layanan untuk mengirim notifikasi menggunakan Firebase Cloud Messaging.
-
-Fungsi utama dalam modul ini adalah ``send_notification`` yang menerima kode
-``event_trigger``, ID pengguna, data dinamis untuk mengganti placeholder,
-serta session SQLAlchemy. Fungsi ini akan:
-
-1. Mengambil template notifikasi dari tabel ``NotificationTemplate`` berdasarkan
-   event trigger dan hanya jika template aktif.
-2. Mengambil daftar token FCM dari tabel ``Device`` untuk pengguna bersangkutan
-   yang masih memiliki ``push_enabled=True`` dan token tidak kosong.
-3. Memformat judul dan isi pesan dengan mengganti placeholder di template
-   menggunakan data dinamis.
-4. Menyimpan rekam notifikasi ke tabel ``Notification`` untuk kebutuhan
-   in‑app notification/history.
-5. Mengirim push notification ke Firebase Cloud Messaging.
-
-Template notifikasi memanfaatkan placeholder dalam bentuk ``{placeholder}``.
-Data dinamis yang dikirim harus berupa dict dengan kunci yang sesuai.
-"""
+# flask_api_face/app/services/notification_service.py
 
 from __future__ import annotations
 
@@ -32,19 +13,7 @@ from ..db.models import NotificationTemplate, Device, Notification
 
 
 def _format_message(template: str, data: Dict[str, Any]) -> str:
-    """Ganti placeholder di dalam template dengan data.
-
-    Parameter ``template`` adalah string yang mungkin berisi token seperti
-    ``{nama_karyawan}`` yang harus digantikan dengan nilai dari ``data``.
-    Jika placeholder tidak ditemukan dalam ``data``, token tidak akan diganti.
-
-    Args:
-        template: String template yang berisi token.
-        data: Dict berisi nilai pengganti. Nilai akan di-cast menjadi string.
-
-    Returns:
-        String yang telah diformat.
-    """
+    """Ganti placeholder di dalam template dengan data."""
     if not template:
         return ""
     result = template
@@ -55,19 +24,7 @@ def _format_message(template: str, data: Dict[str, Any]) -> str:
 
 
 def send_notification(event_trigger: str, user_id: str, dynamic_data: Dict[str, Any], session: Session) -> None:
-    """Kirim notifikasi push untuk pengguna tertentu.
-
-    Args:
-        event_trigger: Kode pemicu template notifikasi.
-        user_id: ID pengguna penerima.
-        dynamic_data: Data untuk mengganti placeholder dalam template.
-        session: Session SQLAlchemy aktif.
-
-    Returns:
-        None. Jika tidak ada template atau token, fungsi mengembalikan tanpa
-        mengirim notifikasi.
-    """
-    # 1. Ambil template notifikasi dari DB
+    """Kirim notifikasi push untuk pengguna tertentu."""
     template: NotificationTemplate | None = (
         session.query(NotificationTemplate)
         .filter(
@@ -77,10 +34,8 @@ def send_notification(event_trigger: str, user_id: str, dynamic_data: Dict[str, 
         .one_or_none()
     )
     if not template:
-        # Template tidak tersedia atau tidak aktif
         return
 
-    # 2. Ambil semua device user dengan token FCM
     devices = (
         session.query(Device)
         .filter(
@@ -92,14 +47,11 @@ def send_notification(event_trigger: str, user_id: str, dynamic_data: Dict[str, 
     )
     tokens = [d.fcm_token for d in devices if d.fcm_token]
     if not tokens:
-        # Tidak ada token yang dapat dikirim
         return
 
-    # 3. Format judul dan isi pesan
     title = _format_message(template.title_template, dynamic_data)
     body = _format_message(template.body_template, dynamic_data)
 
-    # 4. Simpan riwayat notifikasi ke tabel Notification
     notif = Notification(
         id_user=user_id,
         title=title,
@@ -110,19 +62,34 @@ def send_notification(event_trigger: str, user_id: str, dynamic_data: Dict[str, 
     session.add(notif)
     session.commit()
 
-    # 5. Kirim push ke FCM
     try:
+        # --- PERUBAHAN UTAMA DI SINI ---
+        # Siapkan payload 'data' untuk service worker.
+        # Kuncinya harus string, dan nilainya juga harus string.
+        data_payload = {
+            "title": title,
+            "body": body,
+            # Anda bisa menambahkan data lain di sini jika diperlukan oleh aplikasi klien
+            # Misalnya, URL untuk dibuka saat notifikasi di-klik
+            "url": "/", 
+        }
+
         message = messaging.MulticastMessage(
             tokens=tokens,
+            # Payload 'notification' untuk saat aplikasi di foreground
             notification=messaging.Notification(title=title, body=body),
+            # Payload 'data' untuk saat aplikasi di background/terminated
+            data=data_payload,
             android=messaging.AndroidConfig(
                 notification=messaging.AndroidNotification(sound="default")
             ),
             apns=messaging.APNSConfig(
-                payload=messaging.APNSPayload(aps=messaging.Aps(sound="default"))
+                payload=messaging.APNSPayload(aps=messaging.Aps(sound="default", content_available=True)),
             ),
         )
         messaging.send_multicast(message)
-    except Exception:
-        # Jangan melempar error ke API; log dapat ditambahkan di masa depan.
+        # --- AKHIR PERUBAHAN ---
+    except Exception as e:
+        # Sebaiknya log error ini untuk debugging di masa depan
+        print(f"Gagal mengirim notifikasi FCM: {e}")
         pass
