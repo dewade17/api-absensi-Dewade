@@ -49,7 +49,7 @@ def initialize_firebase():
             # 1. Di direktori yang sama dengan file ini
             # 2. Di direktori induk (root aplikasi)
             possible_names = [
-                'e-hrm-2d3fe-firebase-adminsdk-fbsvc-3a0eb724d6.json'
+                'e-hrm-1e3e0-firebase-adminsdk-fbsvc-d9feba4316.json'
             ]
             found = False
             base_dirs = [os.path.dirname(__file__), os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))]

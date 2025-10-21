@@ -1,11 +1,17 @@
 # app/blueprints/location/routes.py
-from flask import Blueprint, request
+from __future__ import annotations
+
+from flask import Blueprint, request, current_app
 from ...utils.responses import ok, error
 from ...utils.geo import haversine_m
 from ...db import get_session
 from ...db.models import Location, User
 
+# Penting: JANGAN menaruh prefix "/api/location" di sini.
+# Prefix akan dipasang saat register_blueprint() di create_app():
+# app.register_blueprint(location_bp, url_prefix="/api/location")
 location_bp = Blueprint("location", __name__)
+
 
 def _serialize(loc: Location):
     return {
@@ -16,7 +22,8 @@ def _serialize(loc: Location):
         "radius": int(loc.radius) if loc.radius is not None else None,
     }
 
-@location_bp.get("/api/location")
+
+@location_bp.get("/")
 def list_locations():
     """List + search + pagination: GET /api/location?q=&page=&page_size="""
     q = (request.args.get("q") or "").strip()
@@ -29,18 +36,19 @@ def list_locations():
         qry = s.query(Location).filter(Location.deleted_at.is_(None))
         if q:
             like = f"%{q}%"
-            # ilike kalau pakai PostgreSQL; MySQL juga bisa pakai lower() kalau perlu
+            # ILIKE untuk PostgreSQL; untuk MySQL bisa diakali dengan lower()
             qry = qry.filter(Location.nama_kantor.ilike(like))
         total = qry.count()
         items = (
             qry.order_by(Location.nama_kantor.asc())
-               .offset((page - 1) * page_size)
-                .limit(page_size)
-                .all()
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+            .all()
         )
         return ok(total=total, page=page, page_size=page_size, items=[_serialize(l) for l in items])
 
-@location_bp.get("/api/location/<loc_id>")
+
+@location_bp.get("/<loc_id>")
 def get_location(loc_id: str):
     with get_session() as s:
         loc = s.get(Location, loc_id)
@@ -48,7 +56,8 @@ def get_location(loc_id: str):
             return error("Lokasi tidak ditemukan", 404)
         return ok(**_serialize(loc))
 
-@location_bp.get("/api/location/nearest")
+
+@location_bp.get("/nearest")
 def nearest_location():
     """Lokasi terdekat: GET /api/location/nearest?lat=&lng=&radius_m=&limit="""
     lat = request.args.get("lat", type=float)
@@ -74,7 +83,8 @@ def nearest_location():
             items=[{**_serialize(l), "distanceMeters": float(d)} for l, d in picked],
         )
 
-@location_bp.get("/api/location/my")
+
+@location_bp.get("/my")
 def my_location():
     """Kantor default user: GET /api/location/my?user_id="""
     user_id = (request.args.get("user_id") or "").strip()

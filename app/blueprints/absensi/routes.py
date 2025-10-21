@@ -1,13 +1,17 @@
 # flask_api_face/app/blueprints/absensi/routes.py
 
-from datetime import datetime, date as _date, timezone # <-- TAMBAHAN: import timezone
+from __future__ import annotations
+
+from datetime import datetime, date as _date, timezone
 from flask import Blueprint, request, current_app
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import joinedload
+
 from ...utils.responses import ok, error
 from ...utils.geo import haversine_m
 from ...utils.timez import now_local, today_local_date
 from ...services.face_service import verify_user
-from ...services.notification_service import send_notification  # BARU
+from ...services.notification_service import send_notification
 from ...db import get_session
 from ...db.models import (
     Location,
@@ -24,16 +28,24 @@ from ...db.models import (
     PolaKerja,
     Istirahat,
 )
-        
-absensi_bp = Blueprint("absensi", __name__) 
+
+# >>> Import Celery tasks (ABSOLUTE import, stabil)
+from app.blueprints.absensi.tasks import (
+    process_checkin_task_v2,
+    process_checkout_task_v2,
+)
+
+absensi_bp = Blueprint("absensi", __name__)
 
 # ---------- helpers ----------
+
 def _get_radius(loc: Location) -> int:
     r = loc.radius if loc and loc.radius is not None else current_app.config.get("DEFAULT_GEOFENCE_RADIUS", 100)
     try:
         return int(r)
     except Exception:
         return 100
+
 
 def _extract_agenda_kerja_ids(req) -> list[str]:
     """
@@ -50,6 +62,7 @@ def _extract_agenda_kerja_ids(req) -> list[str]:
     max_items = int(current_app.config.get("MAX_AGENDA_LINK_PER_REQUEST", 50))
     return cleaned[:max_items]
 
+
 def _extract_recipients(req) -> list[str]:
     """
     Ambil banyak field 'recipient' (multipart) berisi id_user yang dituju.
@@ -63,6 +76,7 @@ def _extract_recipients(req) -> list[str]:
             seen.add(x)
     max_rcp = int(current_app.config.get("MAX_RECIPIENTS_PER_REQUEST", 20))
     return cleaned[:max_rcp]
+
 
 def _extract_catatan_entries(req) -> list[dict[str, str | None]]:
     """Kumpulkan pasangan deskripsi dan lampiran dari permintaan multipart."""
@@ -89,6 +103,7 @@ def _extract_catatan_entries(req) -> list[dict[str, str | None]]:
             break
     return entries
 
+
 def _map_to_atasan_role(user: User) -> AtasanRole | None:
     """
     Snapshot role penerima sesuai enum AtasanRole (HR/OPERASIONAL/DIREKTUR).
@@ -103,6 +118,7 @@ def _map_to_atasan_role(user: User) -> AtasanRole | None:
     if user.role == Role.DIREKTUR:
         return AtasanRole.DIREKTUR
     return None
+
 
 def _link_agendas_to_absensi(session, user_id: str, absensi_id: str, agenda_ids: list[str]) -> tuple[int, int]:
     """
@@ -131,6 +147,7 @@ def _link_agendas_to_absensi(session, user_id: str, absensi_id: str, agenda_ids:
             skipped += 1
     return updated, skipped
 
+
 def _agendas_payload_for_absensi(session, absensi_id: str, id_only: bool = False) -> list:
     """Ambil semua agenda_kerja yang sudah tertaut ke absensi tertentu."""
     rows = (
@@ -139,7 +156,7 @@ def _agendas_payload_for_absensi(session, absensi_id: str, id_only: bool = False
         .order_by(AgendaKerja.created_at.asc())
         .all()
     )
-    
+
     if id_only:
         return [r.id_agenda_kerja for r in rows]
 
@@ -160,8 +177,12 @@ def _agendas_payload_for_absensi(session, absensi_id: str, id_only: bool = False
 
 # ---------- routes absensi (checkin/checkout/status) ----------
 
-@absensi_bp.post("/api/absensi/checkin")
+@absensi_bp.post("/checkin")
 def checkin():
+    """
+    Verifikasi cepat + enqueue Celery task, balas 202.
+    Client dapat mem-poll /api/absensi/status untuk progres hasil.
+    """
     user_id = (request.form.get("user_id") or "").strip()
     loc_id = (request.form.get("location_id") or "").strip()
     lat = request.form.get("lat", type=float)
@@ -182,136 +203,73 @@ def checkin():
         return error("field 'image' wajib ada", 400)
 
     with get_session() as s:
+        # Validasi lokasi & geofence (ringan)
+        loc = s.get(Location, loc_id) if loc_id else None
+        if loc_id and loc is None:
+            return error("Lokasi tidak ditemukan", 404)
+
+        dist = None
+        if loc:
+            # FIX: urutan haversine_m adalah (lat1, lon1, lat2, lon2)
+            dist = haversine_m(lat, lng, float(loc.latitude), float(loc.longitude))
+            radius = _get_radius(loc)
+            if dist > radius:
+                return error(f"Di luar geofence (jarak {int(dist)} m > radius {int(radius)} m)", 400)
+
+        # Verifikasi wajah (ringan)
         try:
-            loc = s.get(Location, loc_id) if loc_id else None
-            if loc_id and loc is None:
-                return error("Lokasi tidak ditemukan", 404)
+            v = verify_user(user_id, f, metric=metric, threshold=threshold)
+            if not v.get("match", False):
+                return error("Verifikasi wajah gagal. Tidak dapat check-in.", 400)
+        except Exception as e:
+            return error(f"Gagal melakukan verifikasi wajah: {str(e)}", 500)
 
-            dist = None
-            if loc:
-                dist = haversine_m(lng, lat, float(loc.longitude), float(loc.latitude))
-                radius = _get_radius(loc)
-                if dist > radius:
-                    return error(f"Di luar geofence (jarak {int(dist)} m > radius {int(radius)} m)", 400)
-
-            try:
-                v = verify_user(user_id, f, metric=metric, threshold=threshold)
-                if not v.get("match", False):
-                    return error("Verifikasi wajah gagal. Tidak dapat check-in.", 400)
-            except Exception as e:
-                return error(f"Gagal melakukan verifikasi wajah: {str(e)}", 500)
-
-            today = today_local_date()
-            now_dt = now_local().replace(tzinfo=None, microsecond=0)
-
-            status_kehadiran = AbsensiStatus.tepat
-            HARI_MAP = {0: "SENIN", 1: "SELASA", 2: "RABU", 3: "KAMIS", 4: "JUMAT", 5: "SABTU", 6: "MINGGU"}
-            nama_hari_ini = HARI_MAP.get(today.weekday())
-
-            # Siapkan variabel jadwal_kerja dan jam_masuk_seharusnya untuk digunakan di bawah.
-            jadwal_kerja = None
-            jam_masuk_seharusnya = None  # simpan jam masuk dari pola kerja jika ada
-
-            if nama_hari_ini:
-                jadwal_kerja = s.query(ShiftKerja).join(PolaKerja).filter(
-                    ShiftKerja.id_user == user_id,
-                    ShiftKerja.tanggal_mulai <= today,
-                    ShiftKerja.tanggal_selesai >= today,
-                    ShiftKerja.hari_kerja.contains(nama_hari_ini)
-                ).first()
-
-            if jadwal_kerja and jadwal_kerja.polaKerja and jadwal_kerja.polaKerja.jam_mulai:
-                # Ambil jam masuk seharusnya (waktu lokal) untuk kebutuhan notifikasi
-                jam_masuk_seharusnya = jadwal_kerja.polaKerja.jam_mulai.time()
-                jam_checkin_aktual = now_dt.time()
-                if jam_checkin_aktual > jam_masuk_seharusnya:
-                    status_kehadiran = AbsensiStatus.terlambat
-            
-            rec = Absensi(
-                id_user=user_id,
-                face_verified_masuk=True,
-                face_verified_pulang=False,
-                tanggal=today,
-                id_lokasi_datang=loc.id_location if loc else None,
-                jam_masuk=now_dt,
-                status_masuk=status_kehadiran,
-                in_latitude=lat,
-                in_longitude=lng,
-            )
-            s.add(rec)
-            
-            s.flush()
-
-            catatan_payload: list[dict[str, str | None]] = []
-            if catatan_entries:
-                catatan_rows: list[Catatan] = []
-                for entry in catatan_entries:
-                    row = Catatan(
-                        id_absensi=rec.id_absensi,
-                        deskripsi_catatan=entry["deskripsi_catatan"],
-                        lampiran_url=entry["lampiran_url"],
-                    )
-                    s.add(row)
-                    catatan_rows.append(row)
-                s.flush()
-                catatan_payload = [{"id_catatan": row.id_catatan, "deskripsi_catatan": row.deskripsi_catatan, "lampiran_url": row.lampiran_url} for row in catatan_rows]
-
-            linked_count, skipped_count = _link_agendas_to_absensi(s, user_id, rec.id_absensi, agenda_ids)
-
-            added_rcp = 0
-            if recipients:
-                existing = {r[0] for r in s.query(AbsensiReportRecipient.id_user).filter(AbsensiReportRecipient.id_absensi == rec.id_absensi).all()}
-                for rid in recipients:
-                    if rid in existing: continue
-                    u = s.get(User, rid)
-                    if u is None: continue
-                    s.add(AbsensiReportRecipient(id_absensi=rec.id_absensi, id_user=rid, recipient_nama_snapshot=u.nama_pengguna, recipient_role_snapshot=_map_to_atasan_role(u), status=ReportStatus.terkirim))
-                    added_rcp += 1
-
-            s.commit()
-
-            # Setelah data tersimpan, kirim notifikasi ke user
-            try:
-                user = s.get(User, user_id)
-                if user:
-                    if status_kehadiran == AbsensiStatus.terlambat:
-                        # Notifikasi terlambat masuk
-                        dyn = {
-                            "nama_karyawan": user.nama_pengguna,
-                            "waktu_checkin": now_dt.strftime("%H:%M"),
-                            "jam_masuk": jam_masuk_seharusnya.strftime("%H:%M") if jam_masuk_seharusnya else "",
-                        }
-                        send_notification("LATE_CHECK_IN", user_id, dyn, s)
-                    else:
-                        # Notifikasi sukses check-in
-                        dyn = {
-                            "nama_karyawan": user.nama_pengguna,
-                            "waktu_checkin": now_dt.strftime("%H:%M"),
-                        }
-                        send_notification("SUCCESS_CHECK_IN", user_id, dyn, s)
-            except Exception:
-                # Jika terjadi error saat mengirim notifikasi, jangan gagalkan proses absensi
-                pass
-
-            return ok(
-                mode="checkin",
-                distanceMeters=dist,
-                agendasLinked=linked_count,
-                agendasSkipped=skipped_count,
-                recipientsAdded=added_rcp,
-                catatan=catatan_payload,
-                **v,
-            )
-        except IntegrityError:
-            s.rollback()
+        # Precheck duplikat agar balasan cepat bila sudah check-in
+        today = today_local_date()
+        already = (
+            s.query(Absensi)
+            .filter(Absensi.id_user == user_id, Absensi.tanggal == today)
+            .one_or_none()
+        )
+        if already:
             return error("Check-in duplikat untuk tanggal ini (sudah check-in).", 409)
-        except Exception as e:
-            s.rollback()
-            return error(f"Terjadi kesalahan internal: {str(e)}", 500)
+
+    # Susun payload untuk background task
+    payload = {
+        "user_id": user_id,
+        "today_local": today.isoformat(),
+        "now_local_iso": now_local().replace(microsecond=0).isoformat(),
+        "location": {
+            "id": loc_id or None,
+            "lat": lat,
+            "lng": lng,
+            "distance_m": int(dist) if dist is not None else None,
+        },
+        "agenda_ids": agenda_ids,          # untuk ditautkan di worker
+        "recipients": recipients,          # untuk AbsensiReportRecipient di worker
+        "catatan_entries": catatan_entries # untuk Catatan di worker
+    }
+
+    # Enqueue Celery task (pakai v2)
+    async_res = process_checkin_task_v2.delay(payload)
+    return (
+        ok(
+            accepted=True,
+            task_id=async_res.id,
+            message="Check-in diterima, diproses di background",
+            distanceMeters=(int(dist) if dist is not None else None),
+            **v,  # propagasi info verifikasi wajah (mis. score/distance)
+        ),
+        202,
+    )
 
 
-@absensi_bp.post("/api/absensi/checkout")
+@absensi_bp.post("/checkout")
 def checkout():
+    """
+    Verifikasi cepat + enqueue Celery task, balas 202.
+    Worker akan mengisi jam_pulang, memperbarui catatan/agendas/recipients, dan kirim notifikasi.
+    """
     user_id = (request.form.get("user_id") or "").strip()
     loc_id = (request.form.get("location_id") or "").strip()
     lat = request.form.get("lat", type=float)
@@ -332,104 +290,68 @@ def checkout():
         return error("field 'image' wajib ada", 400)
 
     with get_session() as s:
+        today = today_local_date()
+        rec = (
+            s.query(Absensi)
+            .filter(Absensi.id_user == user_id, Absensi.tanggal == today)
+            .one_or_none()
+        )
+
+        if rec is None:
+            return error("Belum ada check-in untuk hari ini.", 404)
+
+        loc = s.get(Location, loc_id) if loc_id else None
+        if loc_id and loc is None:
+            return error("Lokasi tidak ditemukan", 404)
+
+        dist = None
+        if loc:
+            # FIX: urutan haversine_m adalah (lat1, lon1, lat2, lon2)
+            dist = haversine_m(lat, lng, float(loc.latitude), float(loc.longitude))
+            radius = _get_radius(loc)
+            if dist > radius:
+                return error(f"Di luar geofence (jarak {int(dist)} m > radius {int(radius)} m)", 400)
+
         try:
-            today = today_local_date()
-            rec = s.query(Absensi).filter(Absensi.id_user == user_id, Absensi.tanggal == today).one_or_none()
-
-            if rec is None:
-                return error("Belum ada check-in untuk hari ini.", 404)
-
-            loc = s.get(Location, loc_id) if loc_id else None
-            if loc_id and loc is None:
-                return error("Lokasi tidak ditemukan", 404)
-
-            dist = None
-            if loc:
-                dist = haversine_m(lng, lat, float(loc.longitude), float(loc.latitude))
-                radius = _get_radius(loc)
-                if dist > radius:
-                    return error(f"Di luar geofence (jarak {int(dist)} m > radius {int(radius)} m)", 400)
-
-            try:
-                v = verify_user(user_id, f, metric=metric, threshold=threshold)
-                if not v.get("match", False):
-                    return error("Verifikasi wajah gagal. Tidak dapat check-out.", 400)
-            except Exception as e:
-                return error(f"Gagal melakukan verifikasi wajah: {str(e)}", 500)
-
-            now_dt = now_local().replace(tzinfo=None, microsecond=0)
-            rec.jam_pulang = now_dt
-            rec.id_lokasi_pulang = loc.id_location if loc else None
-            rec.out_latitude = lat
-            rec.out_longitude = lng
-            rec.face_verified_pulang = True
-
-            existing_catatan = s.query(Catatan).filter(Catatan.id_absensi == rec.id_absensi).order_by(Catatan.id_catatan.asc()).all()
-            kept_rows: list[Catatan] = []
-
-            if catatan_entries:
-                for idx, entry in enumerate(catatan_entries):
-                    if idx < len(existing_catatan):
-                        row = existing_catatan[idx]
-                        row.deskripsi_catatan = entry["deskripsi_catatan"]
-                        row.lampiran_url = entry["lampiran_url"]
-                    else:
-                        row = Catatan(id_absensi=rec.id_absensi, deskripsi_catatan=entry["deskripsi_catatan"], lampiran_url=entry["lampiran_url"])
-                        s.add(row)
-                    kept_rows.append(row)
-                for row in existing_catatan[len(catatan_entries):]:
-                    s.delete(row)
-            else:
-                kept_rows = list(existing_catatan)
-            
-            s.flush()
-
-            catatan_payload = [{"id_catatan": row.id_catatan, "deskripsi_catatan": row.deskripsi_catatan, "lampiran_url": row.lampiran_url} for row in kept_rows]
-            
-            linked_count, skipped_count = _link_agendas_to_absensi(s, user_id, rec.id_absensi, agenda_ids)
-            agendas_payload = _agendas_payload_for_absensi(s, rec.id_absensi)
-
-            added_rcp = 0
-            if recipients:
-                existing = {r[0] for r in s.query(AbsensiReportRecipient.id_user).filter(AbsensiReportRecipient.id_absensi == rec.id_absensi).all()}
-                for rid in recipients:
-                    if rid in existing: continue
-                    u = s.get(User, rid)
-                    if u is None: continue
-                    s.add(AbsensiReportRecipient(id_absensi=rec.id_absensi, id_user=rid, recipient_nama_snapshot=u.nama_pengguna, recipient_role_snapshot=_map_to_atasan_role(u), status=ReportStatus.terkirim))
-                    added_rcp += 1
-
-            s.commit()
-
-            # Kirim notifikasi sukses check-out
-            try:
-                user = s.get(User, user_id)
-                if user:
-                    dyn = {
-                        "nama_karyawan": user.nama_pengguna,
-                        "waktu_checkout": now_dt.strftime("%H:%M"),
-                    }
-                    send_notification("SUCCESS_CHECK_OUT", user_id, dyn, s)
-            except Exception:
-                pass
-
-            return ok(
-                mode="checkout",
-                distanceMeters=dist,
-                jam_pulang=rec.jam_pulang.isoformat() if rec.jam_pulang else None,
-                agendasLinked=linked_count,
-                agendasSkipped=skipped_count,
-                recipientsAdded=added_rcp,
-                catatan=catatan_payload,
-                agendas=agendas_payload,
-                **v,
-            )
+            v = verify_user(user_id, f, metric=metric, threshold=threshold)
+            if not v.get("match", False):
+                return error("Verifikasi wajah gagal. Tidak dapat check-out.", 400)
         except Exception as e:
-            s.rollback()
-            return error(f"Terjadi kesalahan internal saat checkout: {str(e)}", 500)
+            return error(f"Gagal melakukan verifikasi wajah: {str(e)}", 500)
+
+        absensi_id = rec.id_absensi  # diperlukan worker untuk update baris yang sama
+
+    # Payload checkout untuk worker
+    payload = {
+        "user_id": user_id,
+        "absensi_id": absensi_id,
+        "today_local": today.isoformat(),
+        "now_local_iso": now_local().replace(microsecond=0).isoformat(),
+        "location": {
+            "id": loc_id or None,
+            "lat": lat,
+            "lng": lng,
+            "distance_m": int(dist) if dist is not None else None,
+        },
+        "agenda_ids": agenda_ids,           # worker akan menautkan jika ada yg belum
+        "recipients": recipients,           # worker akan tambah penerima laporan
+        "catatan_entries": catatan_entries  # worker akan upsert urutannya
+    }
+
+    async_res = process_checkout_task_v2.delay(payload)
+    return (
+        ok(
+            accepted=True,
+            task_id=async_res.id,
+            message="Check-out diterima, diproses di background",
+            distanceMeters=(int(dist) if dist is not None else None),
+            **v,
+        ),
+        202,
+    )
 
 
-@absensi_bp.get("/api/absensi/status")
+@absensi_bp.get("/status")
 def absensi_status():
     user_id = (request.args.get("user_id") or "").strip()
     if not user_id:
@@ -437,10 +359,11 @@ def absensi_status():
 
     with get_session() as s:
         today = today_local_date()
-        rec = s.query(Absensi).filter(
-            Absensi.id_user == user_id,
-            Absensi.tanggal == today
-        ).one_or_none()
+        rec = (
+            s.query(Absensi)
+            .filter(Absensi.id_user == user_id, Absensi.tanggal == today)
+            .one_or_none()
+        )
 
         if rec is None:
             return ok(mode="checkin", today=str(today), jam_masuk=None, jam_pulang=None, linked_agenda_ids=[])
@@ -464,14 +387,15 @@ def absensi_status():
             linked_agenda_ids=linked_ids,
         )
 
-# --- ENDPOINT BARU UNTUK FITUR ISTIRAHAT ---
 
-@absensi_bp.post("/api/absensi/istirahat/start")
+# --- FITUR ISTIRAHAT ---
+
+@absensi_bp.post("/istirahat/start")
 def start_istirahat():
     user_id = (request.form.get("user_id") or "").strip()
-    lat = request.form.get("start_istirahat_latitude", type=float)  
+    lat = request.form.get("start_istirahat_latitude", type=float)
     lng = request.form.get("start_istirahat_longitude", type=float)
-    
+
     if not user_id:
         return error("user_id wajib ada", 400)
     if lat is None or lng is None:
@@ -480,44 +404,51 @@ def start_istirahat():
     with get_session() as s:
         try:
             today = today_local_date()
-            absensi = s.query(Absensi).filter(
-                Absensi.id_user == user_id,
-                Absensi.tanggal == today
-            ).one_or_none()
+            absensi = (
+                s.query(Absensi)
+                .filter(Absensi.id_user == user_id, Absensi.tanggal == today)
+                .one_or_none()
+            )
 
             if absensi is None or absensi.jam_masuk is None:
                 return error("Anda harus check-in terlebih dahulu sebelum memulai istirahat", 400)
             if absensi.jam_pulang is not None:
                 return error("Tidak dapat memulai istirahat setelah check-out", 400)
 
-            existing_break = s.query(Istirahat).filter(
-                Istirahat.id_absensi == absensi.id_absensi,
-                Istirahat.end_istirahat.is_(None)
-            ).first()
+            existing_break = (
+                s.query(Istirahat)
+                .filter(Istirahat.id_absensi == absensi.id_absensi, Istirahat.end_istirahat.is_(None))
+                .first()
+            )
             if existing_break:
                 return error("Anda sudah dalam sesi istirahat", 409)
 
             now_local_dt = now_local()
             now_dt = now_local_dt.replace(tzinfo=None)
 
-            jadwal_kerja = s.query(ShiftKerja).join(PolaKerja).filter(
-                ShiftKerja.id_user == user_id,
-                ShiftKerja.tanggal_mulai <= today,
-                ShiftKerja.tanggal_selesai >= today
-            ).first()
+            jadwal_kerja = (
+                s.query(ShiftKerja)
+                .join(PolaKerja)
+                .filter(
+                    ShiftKerja.id_user == user_id,
+                    ShiftKerja.tanggal_mulai <= today,
+                    ShiftKerja.tanggal_selesai >= today,
+                )
+                .first()
+            )
 
             if jadwal_kerja and jadwal_kerja.polaKerja:
                 pola = jadwal_kerja.polaKerja
                 if pola.jam_istirahat_mulai and pola.jam_istirahat_selesai:
-                    
-                    # --- PERBAIKAN DI SINI ---
-                    # Langsung ambil komponen waktu (.time()) karena data di DB sudah dalam waktu lokal
                     jam_mulai_seharusnya = pola.jam_istirahat_mulai.time()
                     jam_selesai_seharusnya = pola.jam_istirahat_selesai.time()
                     jam_sekarang = now_local_dt.time()
-                    
+
                     if not (jam_mulai_seharusnya <= jam_sekarang <= jam_selesai_seharusnya):
-                        return error(f"Waktu istirahat hanya diizinkan antara {jam_mulai_seharusnya.strftime('%H:%M')} dan {jam_selesai_seharusnya.strftime('%H:%M')}", 403)
+                        return error(
+                            f"Waktu istirahat hanya diizinkan antara {jam_mulai_seharusnya.strftime('%H:%M')} dan {jam_selesai_seharusnya.strftime('%H:%M')}",
+                            403,
+                        )
 
             new_break = Istirahat(
                 id_user=user_id,
@@ -525,7 +456,7 @@ def start_istirahat():
                 tanggal_istirahat=today,
                 start_istirahat=now_dt,
                 start_istirahat_latitude=lat,
-                start_istirahat_longitude=lng
+                start_istirahat_longitude=lng,
             )
             s.add(new_break)
             s.commit()
@@ -534,14 +465,15 @@ def start_istirahat():
             return ok(
                 message="Sesi istirahat dimulai",
                 id_istirahat=new_break.id_istirahat,
-                start_istirahat=new_break.start_istirahat.isoformat()
+                start_istirahat=new_break.start_istirahat.isoformat(),
             )
 
         except Exception as e:
             s.rollback()
             return error(f"Terjadi kesalahan: {str(e)}", 500)
 
-@absensi_bp.post("/api/absensi/istirahat/end")
+
+@absensi_bp.post("/istirahat/end")
 def end_istirahat():
     user_id = (request.form.get("user_id") or "").strip()
     lat = request.form.get("end_istirahat_latitude", type=float)
@@ -551,22 +483,24 @@ def end_istirahat():
         return error("user_id wajib ada", 400)
     if lat is None or lng is None:
         return error("Koordinat latitude dan longitude wajib ada", 400)
-        
+
     with get_session() as s:
         try:
             today = today_local_date()
-            absensi = s.query(Absensi).filter(
-                Absensi.id_user == user_id,
-                Absensi.tanggal == today
-            ).one_or_none()
+            absensi = (
+                s.query(Absensi)
+                .filter(Absensi.id_user == user_id, Absensi.tanggal == today)
+                .one_or_none()
+            )
 
             if absensi is None:
                 return error("Absensi hari ini tidak ditemukan", 404)
 
-            current_break = s.query(Istirahat).filter(
-                Istirahat.id_absensi == absensi.id_absensi,
-                Istirahat.end_istirahat.is_(None)
-            ).one_or_none()
+            current_break = (
+                s.query(Istirahat)
+                .filter(Istirahat.id_absensi == absensi.id_absensi, Istirahat.end_istirahat.is_(None))
+                .one_or_none()
+            )
 
             if current_break is None:
                 return error("Tidak ada sesi istirahat yang sedang berjalan", 404)
@@ -575,13 +509,13 @@ def end_istirahat():
             current_break.end_istirahat = now_dt
             current_break.end_istirahat_latitude = lat
             current_break.end_istirahat_longitude = lng
-            
+
             s.commit()
 
             return ok(
                 message="Sesi istirahat selesai",
                 id_istirahat=current_break.id_istirahat,
-                end_istirahat=now_dt.isoformat()
+                end_istirahat=now_dt.isoformat(),
             )
 
         except Exception as e:
@@ -589,8 +523,7 @@ def end_istirahat():
             return error(f"Terjadi kesalahan: {str(e)}", 500)
 
 
-# --- PERUBAHAN UTAMA DI SINI ---
-@absensi_bp.get("/api/absensi/istirahat/status")
+@absensi_bp.get("/istirahat/status")
 def istirahat_status():
     user_id = (request.args.get("user_id") or "").strip()
     if not user_id:
@@ -598,8 +531,7 @@ def istirahat_status():
 
     with get_session() as s:
         today = today_local_date()
-        
-        # Helper untuk serialisasi objek Istirahat ke dictionary
+
         def serialize_istirahat(b: Istirahat):
             data = {
                 "id_istirahat": b.id_istirahat,
@@ -619,11 +551,13 @@ def istirahat_status():
                 data["duration_seconds"] = int((b.end_istirahat - b.start_istirahat).total_seconds())
             return data
 
-        # Ambil SEMUA sesi istirahat untuk pengguna pada hari ini
-        all_breaks_today = s.query(Istirahat).join(Absensi).filter(
-            Absensi.id_user == user_id,
-            Istirahat.tanggal_istirahat == today
-        ).order_by(Istirahat.start_istirahat.asc()).all()
+        all_breaks_today = (
+            s.query(Istirahat)
+            .join(Absensi)
+            .filter(Absensi.id_user == user_id, Istirahat.tanggal_istirahat == today)
+            .order_by(Istirahat.start_istirahat.asc())
+            .all()
+        )
 
         active_break = None
         history = []
@@ -637,7 +571,6 @@ def istirahat_status():
             else:
                 total_duration += serialized["duration_seconds"]
 
-        # Tentukan status utama
         status = "active" if active_break else "inactive"
 
         return ok(
